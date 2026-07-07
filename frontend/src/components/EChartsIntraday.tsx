@@ -417,9 +417,9 @@ function buildOption(
     },
     grid: showSubGrid
       ? [
-          { left: 60, right: showMoneyFlow ? 72 : 55, top: 24, bottom: '46%' },
-          { left: 60, right: showMoneyFlow ? 72 : 55, top: '58%', bottom: '24%' },
-          { left: 60, right: showMoneyFlow ? 72 : 55, top: '80%', bottom: 20 },
+          { left: 60, right: showMoneyFlow ? 72 : 55, top: 24, bottom: '64%' },
+          { left: 60, right: showMoneyFlow ? 72 : 55, top: '39%', bottom: '26%' },
+          { left: 60, right: showMoneyFlow ? 72 : 55, top: '78%', bottom: 20 },
         ]
       : [
           { left: 60, right: showMoneyFlow ? 72 : 55, top: 24, bottom: '28%' },
@@ -637,7 +637,7 @@ function buildOption(
           data: moneyFlow.full,
           smooth: false,
           symbol: 'none',
-          lineStyle: { width: 1, color: '#F59E0B' },
+          lineStyle: { width: 1, color: 'rgba(245,158,11,0.5)' },
           connectNulls: true,
         },
         {
@@ -647,7 +647,7 @@ function buildOption(
           data: moneyFlow.main,
           smooth: false,
           symbol: 'none',
-          lineStyle: { width: 1, color: '#EF4444' },
+          lineStyle: { width: 1, color: 'rgba(239,68,68,0.5)' },
           connectNulls: true,
         },
       ] : []),
