@@ -151,9 +151,9 @@ export function Positions() {
             </section>
 
             <section className="rounded-card border border-border/60 bg-surface/40 overflow-hidden">
-              <div className="flex items-center justify-between gap-3 border-b border-border/40 px-4 py-3">
-                <span className="text-sm font-medium text-foreground">分时线</span>
-                <div className="flex items-center gap-1.5">
+              <div className="border-b border-border/40 px-4 py-3 text-sm font-medium text-foreground">分时线</div>
+              <div className="p-3">
+                <div className="flex items-center gap-1.5 px-1 pb-0.5">
                   {(['macd', 'rsi', 'kdj', 'boll', 'moneyflow'] as const).map(key => {
                     const active = intradayIndicators.includes(key)
                     const labelMap: Record<IntradayIndicator, string> = {
@@ -179,8 +179,6 @@ export function Positions() {
                   })}
                   {transactionQ.isFetching && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted" />}
                 </div>
-              </div>
-              <div className="p-3">
                 <StockIntradayChart
                   symbol={activeSymbol}
                   date={latestDate}
