@@ -1,13 +1,15 @@
-import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { Sparkles, LineChart, History as HistoryIcon, Loader2, ExternalLink, Bell } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { useQuery, type UseQueryResult } from '@tanstack/react-query'
+import { Sparkles, LineChart, History as HistoryIcon, Loader2, ExternalLink, Bell, Trophy, Activity, Database } from 'lucide-react'
+import * as echarts from 'echarts'
+import type { ECharts, EChartsOption } from 'echarts'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { StockFinancialSearch } from '@/components/financials/StockFinancialSearch'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { LastStockChip } from '@/components/LastStockChip'
 import { AnalysisKChart, type PriceLevel, type LevelType } from '@/components/stock-analysis/AnalysisKChart'
-import { api } from '@/lib/api'
+import { api, type StockBuyRankOutput, type StockBuyRankRow, type TransactionIntradayOutput } from '@/lib/api'
 import { useLastStock } from '@/lib/useLastStock'
 import { QK } from '@/lib/queryKeys'
 import { toast } from '@/components/Toast'
@@ -181,6 +183,20 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
     staleTime: 60_000,
   })
 
+  const buyRankQ = useQuery({
+    queryKey: QK.stockBuyRank(symbol),
+    queryFn: () => api.stockBuyRank(symbol),
+    enabled: !!symbol,
+    staleTime: 30_000,
+  })
+
+  const transactionQ = useQuery({
+    queryKey: QK.transactionIntraday(symbol),
+    queryFn: () => api.transactionIntraday(symbol),
+    enabled: !!symbol,
+    staleTime: 30_000,
+  })
+
   if (kline.isLoading) {
     return <div className="flex items-center justify-center py-20"><Loader2 className="h-5 w-5 animate-spin text-muted" /></div>
   }
@@ -199,35 +215,401 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
   const isUp = prev ? (last.close >= prev.close) : (last.close >= last.open)
 
   return (
+    <div className="space-y-4">
+      <div className="rounded-card border border-border/60 bg-surface/40 overflow-hidden">
+        <div className="px-4 py-3 border-b border-border/40">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <LineChart className="h-4 w-4 text-sky-400 shrink-0" />
+              <span className="text-sm font-medium text-foreground">关键价位分析</span>
+            </div>
+            <div className="flex items-baseline gap-2 shrink-0">
+              <span className="text-[10px] text-muted">{rows.length} 个交易日</span>
+              <span className="text-[10px] text-muted/60">·</span>
+              <span className="text-[10px] text-muted">当前价</span>
+              <span className={`text-base font-mono font-bold ${isUp ? 'text-bull' : 'text-bear'}`}>
+                {curClose?.toFixed(2) ?? '—'}
+              </span>
+            </div>
+          </div>
+        </div>
+        <div className="p-3">
+          <AnalysisKChart
+            rows={rows}
+            levels={levels}
+            series={levelsQ.data?.series}
+            seriesDates={levelsQ.data?.dates}
+            defaultLevelTypes={['sr', 'pivot', 'keltner_s']}
+            height={480}
+          />
+        </div>
+      </div>
+      <TransactionIntradayPanel symbol={symbol} query={transactionQ} />
+      <StockBuyRankPanel symbol={symbol} query={buyRankQ} />
+    </div>
+  )
+}
+
+function TransactionIntradayPanel({ symbol, query }: { symbol: string; query: UseQueryResult<TransactionIntradayOutput> }) {
+  const data = query.data
+  const rows = data?.rows ?? []
+
+  return (
     <div className="rounded-card border border-border/60 bg-surface/40 overflow-hidden">
       <div className="px-4 py-3 border-b border-border/40">
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2 min-w-0">
-            <LineChart className="h-4 w-4 text-sky-400 shrink-0" />
-            <span className="text-sm font-medium text-foreground">关键价位分析</span>
+            <Activity className="h-4 w-4 text-cyan-400 shrink-0" />
+            <span className="text-sm font-medium text-foreground">Transaction 分时资金</span>
+            {data?.trade_date && <span className="text-[10px] text-muted">{data.trade_date}</span>}
           </div>
-          <div className="flex items-baseline gap-2 shrink-0">
-            <span className="text-[10px] text-muted">{rows.length} 个交易日</span>
-            <span className="text-[10px] text-muted/60">·</span>
-            <span className="text-[10px] text-muted">当前价</span>
-            <span className={`text-base font-mono font-bold ${isUp ? 'text-bull' : 'text-bear'}`}>
-              {curClose?.toFixed(2) ?? '—'}
-            </span>
+          <div className="flex items-center gap-2 text-[10px] text-muted shrink-0">
+            {query.isFetching && <Loader2 className="h-3 w-3 animate-spin" />}
+            {data?.summary && (
+              <>
+                <span>{data.summary.min_time}-{data.summary.max_time}</span>
+                <span>{data.summary.points} 点</span>
+              </>
+            )}
           </div>
         </div>
       </div>
-      <div className="p-3">
-        <AnalysisKChart
-          rows={rows}
-          levels={levels}
-          series={levelsQ.data?.series}
-          seriesDates={levelsQ.data?.dates}
-          defaultLevelTypes={['sr', 'pivot', 'keltner_s']}
-          height={480}
-        />
-      </div>
+
+      {query.isLoading ? (
+        <div className="flex items-center justify-center py-10"><Loader2 className="h-5 w-5 animate-spin text-muted" /></div>
+      ) : !data?.available || rows.length === 0 ? (
+        <div className="flex items-center gap-2 px-4 py-5 text-xs text-muted">
+          <Database className="h-4 w-4" />
+          <span>{data?.message || '暂无 transaction 分时数据'}</span>
+        </div>
+      ) : (
+        <div className="p-4 space-y-3">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-right">
+            <div className="text-left">
+              <div className="text-[10px] text-muted">源文件</div>
+              <div className="truncate text-[10px] text-secondary">{data.source_path || '—'}</div>
+            </div>
+            <Metric label="最新价" value={fmtNum(data.summary?.last_price, 2)} />
+            <Metric label="全量净额" value={`${fmtSigned(data.summary?.full_net_w, 0)}w`} tone={(data.summary?.full_net_w ?? 0) >= 0 ? 'up' : 'down'} />
+            <Metric label="主力净额" value={`${fmtSigned(data.summary?.main_net_w, 0)}w`} tone={(data.summary?.main_net_w ?? 0) >= 0 ? 'up' : 'down'} />
+            <Metric label="盘后额" value={`${fmtNum(data.summary?.after_amount_w, 0)}w`} />
+          </div>
+          <TransactionIntradayChart data={data} symbol={symbol} />
+        </div>
+      )}
     </div>
   )
+}
+
+function TransactionIntradayChart({ data, symbol }: { data: TransactionIntradayOutput; symbol: string }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const chartRef = useRef<ECharts | null>(null)
+  const rows = data.rows ?? []
+
+  useEffect(() => {
+    if (!ref.current) return
+    if (!chartRef.current) {
+      chartRef.current = echarts.init(ref.current, undefined, { renderer: 'canvas' })
+    }
+    const chart = chartRef.current
+    const times = rows.map((r) => r.time)
+    const price = rows.map((r) => r.price)
+    const fullNet = rows.map((r) => r.full_net_w)
+    const mainNet = rows.map((r) => r.main_net_w)
+    const afterAmt = rows.map((r) => r.after_amount_cum_w)
+    const option: EChartsOption = {
+      backgroundColor: 'transparent',
+      animation: false,
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'cross' },
+        formatter: (params: any) => {
+          const items = Array.isArray(params) ? params : [params]
+          const idx = items[0]?.dataIndex ?? 0
+          const r = rows[idx]
+          if (!r) return ''
+          return [
+            `${symbol} ${r.time}`,
+            `价格 ${r.price.toFixed(2)}`,
+            `全量净额 ${fmtSigned(r.full_net_w, 0)}w`,
+            `主力净额 ${fmtSigned(r.main_net_w, 0)}w`,
+            r.after_amount_cum_w > 0 ? `盘后累计 ${fmtNum(r.after_amount_cum_w, 0)}w` : '',
+          ].filter(Boolean).join('<br/>')
+        },
+      },
+      legend: {
+        top: 4,
+        right: 8,
+        textStyle: { color: '#94a3b8', fontSize: 10 },
+        itemWidth: 12,
+        itemHeight: 6,
+      },
+      grid: { left: 48, right: 58, top: 34, bottom: 28 },
+      xAxis: {
+        type: 'category',
+        data: times,
+        boundaryGap: false,
+        axisLabel: { color: '#94a3b8', fontSize: 10, hideOverlap: true },
+        axisLine: { lineStyle: { color: 'rgba(148,163,184,0.25)' } },
+        axisTick: { show: false },
+      },
+      yAxis: [
+        {
+          type: 'value',
+          scale: true,
+          name: '价格',
+          nameTextStyle: { color: '#94a3b8', fontSize: 10 },
+          axisLabel: { color: '#94a3b8', fontSize: 10 },
+          splitLine: { lineStyle: { color: 'rgba(148,163,184,0.12)' } },
+        },
+        {
+          type: 'value',
+          scale: true,
+          name: '万元',
+          nameTextStyle: { color: '#94a3b8', fontSize: 10 },
+          axisLabel: { color: '#94a3b8', fontSize: 10, formatter: (v: number) => `${Math.round(v / 10000)}亿` },
+          splitLine: { show: false },
+        },
+      ],
+      dataZoom: [
+        { type: 'inside', xAxisIndex: 0 },
+        { type: 'slider', height: 16, bottom: 4, borderColor: 'rgba(148,163,184,0.2)', textStyle: { color: '#94a3b8', fontSize: 9 } },
+      ],
+      series: [
+        {
+          name: '价格',
+          type: 'line',
+          yAxisIndex: 0,
+          data: price,
+          smooth: false,
+          showSymbol: false,
+          lineStyle: { width: 1.4, color: '#38bdf8' },
+        },
+        {
+          name: '全量净额',
+          type: 'line',
+          yAxisIndex: 1,
+          data: fullNet,
+          smooth: false,
+          showSymbol: false,
+          lineStyle: { width: 1.2, color: '#f59e0b' },
+        },
+        {
+          name: '主力净额',
+          type: 'line',
+          yAxisIndex: 1,
+          data: mainNet,
+          smooth: false,
+          showSymbol: false,
+          lineStyle: { width: 1.2, color: '#ef4444' },
+        },
+        {
+          name: '盘后额',
+          type: 'line',
+          yAxisIndex: 1,
+          data: afterAmt,
+          smooth: false,
+          showSymbol: false,
+          lineStyle: { width: 1, color: '#22c55e', type: 'dashed' },
+        },
+      ],
+    }
+    chart.setOption(option, true)
+    const resize = () => chart.resize()
+    window.addEventListener('resize', resize)
+    return () => window.removeEventListener('resize', resize)
+  }, [data, rows, symbol])
+
+  useEffect(() => () => chartRef.current?.dispose(), [])
+
+  return <div ref={ref} className="h-[360px] w-full" />
+}
+
+function StockBuyRankPanel({ symbol, query }: { symbol: string; query: UseQueryResult<StockBuyRankOutput> }) {
+  const data = query.data
+  const rows = data?.rows ?? []
+  const best = data?.best ?? rows.find((r) => r.sbr_rank === 1)
+  const matched = data?.matched ?? rows.find((r) => r.stock_code === symbol)
+  const primary = matched ?? best
+  const dateText = data?.trade_date ? `${data.trade_date}${data.asof ? ` ${String(data.asof).padStart(4, '0')}` : ''}` : 'latest'
+  const primaryComments = primary ? stockBuyRankComments(primary) : []
+
+  return (
+    <div className="rounded-card border border-border/60 bg-surface/40 overflow-hidden">
+      <div className="px-4 py-3 border-b border-border/40">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 min-w-0">
+            <Trophy className="h-4 w-4 text-amber-400 shrink-0" />
+            <span className="text-sm font-medium text-foreground">Stock-Buy-Rank 输出</span>
+            {data?.source_model && <span className="text-[10px] text-muted">来自 {data.source_model}</span>}
+          </div>
+          <div className="flex items-center gap-2 text-[10px] text-muted shrink-0">
+            {query.isFetching && <Loader2 className="h-3 w-3 animate-spin" />}
+            <span>{dateText}</span>
+            {data?.status && <span className={data.status === 'pass' ? 'text-success' : 'text-warning'}>{data.status}</span>}
+          </div>
+        </div>
+      </div>
+
+      {query.isLoading ? (
+        <div className="flex items-center justify-center py-10"><Loader2 className="h-5 w-5 animate-spin text-muted" /></div>
+      ) : !data?.available ? (
+        <div className="flex items-center gap-2 px-4 py-5 text-xs text-muted">
+          <Database className="h-4 w-4" />
+          <span>{data?.message || '暂无 stock-buy-rank 输出'}</span>
+        </div>
+      ) : (
+        <div className="p-4 space-y-4">
+          {data.message && (
+            <div className="flex items-center gap-2 rounded-md border border-border/40 bg-elevated/30 px-3 py-2 text-xs text-muted">
+              <Activity className="h-3.5 w-3.5 text-sky-400" />
+              <span>{data.message}</span>
+            </div>
+          )}
+
+          {primary && (
+            <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3">
+              <div className="min-w-0">
+                <div className="text-[10px] text-muted mb-1">{matched ? '当前个股扫描结果' : '最终买入优先'}</div>
+                <div className="flex flex-wrap items-baseline gap-2">
+                  <span className="text-lg font-semibold text-foreground">{primary.stock_code}</span>
+                  <span className="text-sm text-secondary">{primary.name || '—'}</span>
+                  <span className="text-xs text-amber-300">Rank {primary.sbr_rank ?? '—'} {primary.sbr_label || ''}</span>
+                </div>
+                {primaryComments.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {primaryComments.map((comment) => (
+                      <span
+                        key={comment}
+                        className="rounded-md border border-amber-400/25 bg-amber-400/10 px-2 py-0.5 text-[10px] text-amber-200"
+                      >
+                        {comment}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="grid grid-cols-4 gap-2 text-right">
+                <Metric label="SBR分" value={fmtNum(primary.sbr_score, 0)} />
+                <Metric label="涨跌" value={`${fmtSigned(primary.ret_pct, 1)}%`} tone={(primary.ret_pct ?? 0) >= 0 ? 'up' : 'down'} />
+                <Metric label="主动净买" value={`${fmtSigned(primary.net_w, 0)}w`} tone={(primary.net_w ?? 0) >= 0 ? 'up' : 'down'} />
+                <Metric label="等级" value={primary.sbr_grade || '—'} />
+              </div>
+              {hasMainForce(primary) && (
+                <div className="md:col-span-2 grid grid-cols-2 md:grid-cols-5 gap-2 rounded-md border border-border/40 bg-elevated/20 px-3 py-2 text-right">
+                  <div className="text-left">
+                    <div className="text-[10px] text-muted">主力估算</div>
+                    <div className="text-[10px] text-secondary">均笔金额代理</div>
+                  </div>
+                  <Metric label="主力净" value={`${fmtSigned(primary.main_net_w, 0)}w`} tone={(primary.main_net_w ?? 0) >= 0 ? 'up' : 'down'} />
+                  <Metric label="顶主力" value={`${fmtSigned(primary.main_top_net_w, 0)}w`} tone={(primary.main_top_net_w ?? 0) >= 0 ? 'up' : 'down'} />
+                  <Metric label="底主力" value={`${fmtSigned(primary.main_bot_net_w, 0)}w`} tone={(primary.main_bot_net_w ?? 0) >= 0 ? 'up' : 'down'} />
+                  <Metric label="主力占比" value={`${fmtNum(primary.main_share_pct, 1)}%`} />
+                </div>
+              )}
+              {hasAfterHours(primary) && (
+                <div className="md:col-span-2 grid grid-cols-2 md:grid-cols-5 gap-2 rounded-md border border-cyan-400/25 bg-cyan-400/10 px-3 py-2 text-right">
+                  <div className="text-left">
+                    <div className="text-[10px] text-cyan-300">盘后定价</div>
+                    <div className="text-[10px] text-secondary">15:05-15:30</div>
+                  </div>
+                  <Metric label="盘后额" value={`${fmtNum(primary.after_amt_w, 0)}w`} />
+                  <Metric label="盘后主力" value={`${fmtNum(primary.after_main_amt_w, 0)}w`} />
+                  <Metric label="主力占比" value={`${fmtNum(primary.after_main_share_pct, 1)}%`} />
+                  <Metric label="盘后价" value={fmtNum(primary.after_price, 2)} />
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="text-muted">
+                <tr className="border-b border-border/40">
+                  <th className="py-2 pr-3 text-left font-medium">SBR</th>
+                  <th className="py-2 pr-3 text-left font-medium">股票</th>
+                  <th className="py-2 pr-3 text-right font-medium">分数</th>
+                  <th className="py-2 pr-3 text-right font-medium">收盘</th>
+                  <th className="py-2 pr-3 text-right font-medium">涨跌</th>
+                  <th className="py-2 pr-3 text-right font-medium">主动净买</th>
+                  <th className="py-2 pr-3 text-right font-medium">主力净</th>
+                  <th className="py-2 pr-3 text-left font-medium">判断</th>
+                  <th className="py-2 text-right font-medium">模型排位</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r: StockBuyRankRow) => {
+                  const comments = stockBuyRankComments(r)
+                  return (
+                    <tr key={r.stock_code} className={`border-b border-border/25 last:border-0 ${r.stock_code === symbol ? 'bg-sky-400/5' : ''}`}>
+                      <td className="py-2 pr-3 text-left text-amber-300">{r.sbr_rank ?? '—'}</td>
+                      <td className="py-2 pr-3 text-left">
+                        <span className="font-mono text-foreground">{r.stock_code}</span>
+                        <span className="ml-2 text-secondary">{r.name || '—'}</span>
+                      </td>
+                      <td className="py-2 pr-3 text-right font-mono text-foreground">{fmtNum(r.sbr_score, 0)}</td>
+                      <td className="py-2 pr-3 text-right font-mono text-secondary">{fmtNum(r.close, 2)}</td>
+                      <td className={`py-2 pr-3 text-right font-mono ${(r.ret_pct ?? 0) >= 0 ? 'text-bull' : 'text-bear'}`}>{fmtSigned(r.ret_pct, 1)}%</td>
+                      <td className={`py-2 pr-3 text-right font-mono ${(r.net_w ?? 0) >= 0 ? 'text-bull' : 'text-bear'}`}>{fmtSigned(r.net_w, 0)}w</td>
+                      <td className={`py-2 pr-3 text-right font-mono ${(r.main_net_w ?? 0) >= 0 ? 'text-bull' : 'text-bear'}`}>{fmtSigned(r.main_net_w, 0)}w</td>
+                      <td className="py-2 pr-3 text-left text-[10px] text-secondary">
+                        {comments.length > 0 ? (
+                          <div className="flex max-w-80 flex-wrap gap-1">
+                            {comments.slice(0, 3).map((comment) => (
+                              <span key={comment} className="rounded border border-border/40 bg-elevated/35 px-1.5 py-0.5">
+                                {comment}
+                              </span>
+                            ))}
+                          </div>
+                        ) : '—'}
+                      </td>
+                      <td className="py-2 text-right font-mono text-muted">{r.model_rank ?? '—'}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {data.source_path && <div className="truncate text-[10px] text-muted/70">源文件: {data.source_path}</div>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function stockBuyRankComments(row: StockBuyRankRow): string[] {
+  const parts = [row.sbr_label, row.reasons]
+    .flatMap((value) => String(value || '').split('|'))
+    .map((value) => value.trim())
+    .filter(Boolean)
+  return Array.from(new Set(parts))
+}
+
+function hasMainForce(row: StockBuyRankRow): boolean {
+  return [row.main_net_w, row.main_top_net_w, row.main_bot_net_w, row.main_share_pct]
+    .some((value) => typeof value === 'number' && Number.isFinite(value))
+}
+
+function hasAfterHours(row: StockBuyRankRow): boolean {
+  return typeof row.after_amt_w === 'number' && Number.isFinite(row.after_amt_w) && row.after_amt_w > 0
+}
+
+function Metric({ label, value, tone }: { label: string; value: string; tone?: 'up' | 'down' }) {
+  return (
+    <div>
+      <div className="text-[10px] text-muted">{label}</div>
+      <div className={`font-mono text-sm ${tone === 'up' ? 'text-bull' : tone === 'down' ? 'text-bear' : 'text-foreground'}`}>{value}</div>
+    </div>
+  )
+}
+
+function fmtNum(v: unknown, digits: number): string {
+  return typeof v === 'number' && Number.isFinite(v) ? v.toFixed(digits) : '—'
+}
+
+function fmtSigned(v: unknown, digits: number): string {
+  return typeof v === 'number' && Number.isFinite(v) ? `${v >= 0 ? '+' : ''}${v.toFixed(digits)}` : '—'
 }
 
 // ===== 历史报告列表 =====

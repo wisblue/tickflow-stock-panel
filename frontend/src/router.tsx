@@ -14,6 +14,7 @@ import { AnalysisDetail } from './pages/AnalysisDetail'
 import { ConceptAnalysis } from './pages/ConceptAnalysis'
 import { IndustryAnalysis } from './pages/IndustryAnalysis'
 import { StockAnalysis } from './pages/StockAnalysis'
+import { Positions } from './pages/Positions'
 import { Review } from './pages/Review'
 import { LimitUpLadder } from './pages/LimitUpLadder'
 import { Branding } from './pages/Branding'
@@ -71,6 +72,7 @@ export const router = createBrowserRouter([
       { path: 'stock-analysis', element: <StockAnalysis /> },
       { path: 'review', element: <Review /> },
       { path: 'watchlist', element: <Watchlist /> },
+      { path: 'positions', element: <Positions /> },
       { path: 'screener', element: <Screener /> },
       { path: 'backtest', element: <Backtest /> },
       { path: 'financials', element: <Financials /> },

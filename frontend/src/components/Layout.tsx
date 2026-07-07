@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import { NavLink, Outlet, useNavigate } from 'react-router-dom'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { useQuoteStream } from '@/lib/useQuoteStream'
@@ -43,6 +43,7 @@ import {
   CheckCircle2,
   BookOpenCheck,
   ExternalLink,
+  WalletCards,
   Sun,
   Moon,
   X,
@@ -52,6 +53,13 @@ import { api, type IndexQuote } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { toggleTheme, useTheme } from '@/lib/theme'
 import { setCurrentTotal as setAlertTotal, useUnreadAlerts } from '@/lib/monitorBadge'
+import {
+  getActivePositionSymbol,
+  loadPositions,
+  setActivePositionSymbol,
+  subscribePositionsChanged,
+  type PositionStock,
+} from '@/lib/positions'
 
 // 品牌色 — 只用于 logo / brand 区域,不影响功能语义色
 const BRAND = '#8B5CF6'
@@ -69,6 +77,7 @@ type CoreIndex = (typeof CORE_INDEXES)[number]
 const nav = [
   { to: '/',                label: '看板',     icon: LayoutDashboard },
   { to: '/watchlist',  label: '自选',   icon: Star },
+  { to: '/positions', label: '持仓', icon: WalletCards },
   { to: '/screener',   label: '策略',   icon: ScanSearch },
   { to: '/backtest',   label: '回测',   icon: History },
   { to: '/stock-analysis',    label: '个股分析', icon: TrendingUp },
@@ -274,6 +283,41 @@ function AIConfigBadge({ configured, model }: { configured?: boolean; model?: st
   )
 }
 
+function PositionNavChildren({
+  expanded,
+  rows,
+  activeSymbol,
+  onSelect,
+}: {
+  expanded: boolean
+  rows: PositionStock[]
+  activeSymbol: string
+  onSelect: (symbol: string) => void
+}) {
+  if (!expanded || rows.length === 0) return null
+  return (
+    <div className="ml-7 mt-0.5 space-y-0.5 pb-1">
+      {rows.map((row) => (
+        <button
+          key={row.symbol}
+          type="button"
+          onClick={() => onSelect(row.symbol)}
+          className={cn(
+            'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[11px] transition-colors',
+            activeSymbol === row.symbol
+              ? 'bg-elevated text-foreground'
+              : 'text-secondary hover:bg-elevated/60 hover:text-foreground',
+          )}
+          title={`${row.symbol} ${row.name}`}
+        >
+          <span className="shrink-0 font-mono">{row.symbol}</span>
+          <span className="min-w-0 truncate">{row.name || '—'}</span>
+        </button>
+      ))}
+    </div>
+  )
+}
+
 export function Layout() {
   // ===== 共享 hooks (替代内联 useQuery) =====
   const { data: caps } = useCapabilities()
@@ -319,6 +363,7 @@ export function Layout() {
 
   const qc = useQueryClient()
   const navigate = useNavigate()
+  const location = useLocation()
   const version = versionData?.version
   const realtimeEnabled = prefs?.realtime_quotes_enabled ?? false
   // Free 档监控限制提示: 可手动关闭, 不持久化 (刷新后恢复显示)
@@ -351,6 +396,21 @@ export function Layout() {
     ? (dataSources?.custom?.find(s => s.name === realtimeProvider)?.display_name || realtimeProvider)
     : null
 
+  const [positionRows, setPositionRows] = useState<PositionStock[]>(() => loadPositions())
+  const [activePositionSymbol, setActivePositionSymbolState] = useState(() => getActivePositionSymbol())
+  const positionsExpanded = location.pathname.startsWith('/positions')
+
+  useEffect(() => subscribePositionsChanged(() => {
+    setPositionRows(loadPositions())
+    setActivePositionSymbolState(getActivePositionSymbol())
+  }), [])
+
+  const handleSelectPosition = (symbol: string) => {
+    setActivePositionSymbol(symbol)
+    setActivePositionSymbolState(symbol)
+    navigate(`/positions?symbol=${encodeURIComponent(symbol)}`)
+  }
+
   // 当前主数据源 (用于菜单底部状态条)
   const activeProvider = prefs?.daily_data_provider || 'tickflow'
   const activeProviderName = activeProvider === 'tickflow'
@@ -380,7 +440,7 @@ export function Layout() {
     .filter(m => m.visible)
     .map(m => ({ to: `/analysis/${m.id}`, label: m.label, icon: m.icon === 'tags' ? Tags : BarChart3 }))
 
-  const allNav = [...nav, ...analysisNav]
+  const allNav = useMemo(() => [...nav, ...analysisNav], [analysisNav])
   const savedOrder = prefs?.nav_order ?? []
 
   const navItems = savedOrder.length > 0
@@ -446,54 +506,60 @@ export function Layout() {
             className="mt-3 h-px"
             style={{ background: `linear-gradient(90deg, ${BRAND}88, transparent 80%)` }}
           />
-
-          <TierBadge
-            label={caps?.label ?? ''}
-            hasKey={settingsState?.mode !== 'none'}
-          />
-          <AIConfigBadge
-            configured={settingsState?.ai_configured ?? settingsState?.has_ai_key}
-            model={settingsState?.ai_model}
-          />
         </div>
 
         <nav className="flex-1 min-h-0 overflow-y-auto px-2 py-3 space-y-0.5">
-          {visibleNavItems.map(({ to, label, icon: Icon }) => (
-            <NavLink
-              key={to}
-              to={to}
-              className={({ isActive }) =>
-                cn(
-                  'flex items-center gap-3 px-3 py-2 rounded-btn text-sm transition-colors duration-150 ease-smooth',
-                  isActive
-                    ? 'bg-elevated text-foreground font-medium'
-                    : 'text-foreground/80 hover:bg-elevated hover:text-foreground',
-                )
-              }
-            >
-              {({ isActive }) => (
-                <>
-                  <Icon className="h-4 w-4 shrink-0" />
-                  <span className="flex-1">{label}</span>
-                  {/* 个股分析 Beta 标识 */}
-                  {(to === '/stock-analysis' || to === '/review') && (
-                    <span className="inline-flex items-center rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-400 shrink-0">
-                      Beta
-                    </span>
+          {visibleNavItems.map((item) => {
+            const { to, label, icon: Icon } = item
+            return (
+              <div key={to}>
+                <NavLink
+                  to={to}
+                  className={({ isActive }) =>
+                    cn(
+                      'flex items-center gap-3 px-3 py-2 rounded-btn text-sm transition-colors duration-150 ease-smooth',
+                      isActive
+                        ? 'bg-elevated text-foreground font-medium'
+                        : 'text-foreground/80 hover:bg-elevated hover:text-foreground',
+                    )
+                  }
+                >
+                  {({ isActive }) => (
+                    <>
+                      <Icon className="h-4 w-4 shrink-0" />
+                      <span className="flex-1">{label}</span>
+                      {to === '/positions' && positionRows.length > 0 && (
+                        <span className="font-mono text-[10px] text-muted">{positionRows.length}</span>
+                      )}
+                      {/* 个股分析 Beta 标识 */}
+                      {(to === '/stock-analysis' || to === '/review') && (
+                        <span className="inline-flex items-center rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-400 shrink-0">
+                          Beta
+                        </span>
+                      )}
+                      {/* 数据同步状态: 同步中转圈, 刚完成显示绿色对勾闪烁 3 秒 */}
+                      {to === '/data' && isDataSyncing && (
+                        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
+                      )}
+                      {to === '/data' && !isDataSyncing && dataSyncJustDone && (
+                        <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-bull animate-pulse" />
+                      )}
+                      {/* 监控中心徽标: 仅非监控页且有未读时显示 */}
+                      {to === '/monitor' && <MonitorBadge active={isActive} />}
+                    </>
                   )}
-                  {/* 数据同步状态: 同步中转圈, 刚完成显示绿色对勾闪烁 3 秒 */}
-                  {to === '/data' && isDataSyncing && (
-                    <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
-                  )}
-                  {to === '/data' && !isDataSyncing && dataSyncJustDone && (
-                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-bull animate-pulse" />
-                  )}
-                  {/* 监控中心徽标: 仅非监控页且有未读时显示 */}
-                  {to === '/monitor' && <MonitorBadge active={isActive} />}
-                </>
-              )}
-            </NavLink>
-          ))}
+                </NavLink>
+                {to === '/positions' && (
+                  <PositionNavChildren
+                    expanded={positionsExpanded}
+                    rows={positionRows}
+                    activeSymbol={activePositionSymbol}
+                    onSelect={handleSelectPosition}
+                  />
+                )}
+              </div>
+            )
+          })}
         </nav>
 
         {/* 数据源状态条 */}
@@ -628,6 +694,16 @@ export function Layout() {
         </div>
 
         <div className="border-t border-border px-2 py-3 shrink-0">
+          <div className="px-2.5 pb-2">
+            <TierBadge
+              label={caps?.label ?? ''}
+              hasKey={settingsState?.mode !== 'none'}
+            />
+            <AIConfigBadge
+              configured={settingsState?.ai_configured ?? settingsState?.has_ai_key}
+              model={settingsState?.ai_model}
+            />
+          </div>
           <div className="flex items-center gap-1">
             <ThemeToggle />
             <NavLink

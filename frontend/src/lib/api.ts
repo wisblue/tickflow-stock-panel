@@ -174,6 +174,83 @@ export interface AiStockReport {
   created_at: string
 }
 
+export interface StockBuyRankRow {
+  stock_code: string
+  name: string
+  model_rank?: number | null
+  model_score?: number | null
+  sbr_rank?: number | null
+  sbr_label?: string
+  sbr_score?: number | null
+  close?: number | null
+  ret_pct?: number | null
+  net_w?: number | null
+  main_net_w?: number | null
+  main_top_net_w?: number | null
+  main_bot_net_w?: number | null
+  main_l30_net_w?: number | null
+  main_share_pct?: number | null
+  after_amt_w?: number | null
+  after_main_amt_w?: number | null
+  after_main_share_pct?: number | null
+  after_price?: number | null
+  ret_3d_pct?: number | null
+  sbr_grade?: string
+  rank_delta?: number | null
+  reasons?: string
+  t_max?: number | null
+}
+
+export interface StockBuyRankOutput {
+  available: boolean
+  message?: string
+  trade_date?: string
+  asof?: number | null
+  source_model?: string
+  source_path?: string
+  status?: string
+  elapsed_sec?: number | null
+  symbol_matched?: boolean
+  best?: StockBuyRankRow | null
+  matched?: StockBuyRankRow | null
+  rows: StockBuyRankRow[]
+  report_excerpt?: string
+}
+
+export interface TransactionIntradayRow {
+  time: string
+  time_hhmmss: number
+  price: number
+  full_net_w: number
+  main_net_w: number
+  full_delta_w: number
+  main_delta_w: number
+  after_amount_w: number
+  after_amount_cum_w: number
+  volume: number
+  trade_count: number
+}
+
+export interface TransactionIntradayOutput {
+  available: boolean
+  message?: string
+  symbol?: string
+  trade_date?: string
+  source_path?: string
+  main_threshold_w?: number
+  rows: TransactionIntradayRow[]
+  summary?: {
+    points: number
+    raw_rows: number
+    min_time: string
+    max_time: string
+    last_price?: number | null
+    full_net_w: number
+    main_net_w: number
+    after_amount_w: number
+  }
+}
+
 // ===== Kline =====
 export interface MinuteKlineRow {
   datetime: string
@@ -1568,6 +1645,14 @@ export const api = {
   // ===== 个股分析 =====
   stockAnalysisLevels: (symbol: string, days = 120) =>
     request<StockLevels>(`/api/stock-analysis/levels?symbol=${encodeURIComponent(symbol)}&days=${days}`),
+
+  stockBuyRank: (symbol?: string) =>
+    request<StockBuyRankOutput>(`/api/stock-analysis/stock-buy-rank${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''}`),
+
+  transactionIntraday: (symbol: string, tradeDate?: string) =>
+    request<TransactionIntradayOutput>(
+      `/api/stock-analysis/transaction-intraday?symbol=${encodeURIComponent(symbol)}${tradeDate ? `&trade_date=${encodeURIComponent(tradeDate)}` : ''}`,
+    ),
 
   stockAnalysisReportsList: () =>
     request<{ reports: AiStockReport[] }>('/api/stock-analysis/reports'),

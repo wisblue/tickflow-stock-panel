@@ -55,6 +55,8 @@ export const QK = {
   kline:                (symbol: string, start: string, end: string, extColumns?: string) =>
                            ['kline', symbol, start, end, extColumns ?? ''] as const,
   stockLevels:          (symbol: string, days?: number) => ['stock-levels', symbol, days ?? 120] as const,
+  stockBuyRank:         (symbol: string) => ['stock-buy-rank', symbol] as const,
+  transactionIntraday:  (symbol: string) => ['transaction-intraday', symbol] as const,
   klineMinute:          (symbol: string, date: string) =>
                              ['kline-minute', symbol, date] as const,
   indexDaily:           (symbol: string, start: string, end: string) =>
