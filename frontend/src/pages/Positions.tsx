@@ -139,18 +139,6 @@ export function Positions() {
             </div>
 
             <section className="rounded-card border border-border/60 bg-surface/40 overflow-hidden">
-              <div className="border-b border-border/40 px-4 py-3 text-sm font-medium text-foreground">日 K 线</div>
-              <div className="p-3">
-                <StockDailyKChart
-                  symbol={activeSymbol}
-                  height={430}
-                  visibleBars={90}
-                  onDataChange={setChartInfo}
-                />
-              </div>
-            </section>
-
-            <section className="rounded-card border border-border/60 bg-surface/40 overflow-hidden">
               <div className="border-b border-border/40 px-4 py-3 text-sm font-medium text-foreground">分时线</div>
               <div className="p-3">
                 <div className="flex items-center gap-1.5 px-1 pb-0.5">
@@ -186,6 +174,18 @@ export function Positions() {
                   height={360}
                   indicators={intradayIndicators}
                   moneyFlowRows={transactionQ.data?.rows}
+                />
+              </div>
+            </section>
+
+            <section className="rounded-card border border-border/60 bg-surface/40 overflow-hidden">
+              <div className="border-b border-border/40 px-4 py-3 text-sm font-medium text-foreground">日 K 线</div>
+              <div className="p-3">
+                <StockDailyKChart
+                  symbol={activeSymbol}
+                  height={430}
+                  visibleBars={90}
+                  onDataChange={setChartInfo}
                 />
               </div>
             </section>
