@@ -259,16 +259,24 @@ function buildOption(
   const lows = new Array(FULL_DAY_TIMES.length).fill(null) as (number | null)[]
   const avgData = new Array(FULL_DAY_TIMES.length).fill(null) as (number | null)[]
   const volumes = new Array(FULL_DAY_TIMES.length).fill(null) as (any | null)[]
-  const showSubGrid = indicators.some(key => key === 'macd' || key === 'rsi' || key === 'kdj')
+  const subIndicators = (['macd', 'rsi', 'kdj'] as const).filter(key => indicators.includes(key))
+  const showSubGrid = subIndicators.length > 0
   const showMoneyFlow = indicators.includes('moneyflow')
   const boll = indicators.includes('boll') ? computeBoll(data) : null
   const macd = indicators.includes('macd') ? computeMacd(data) : null
   const rsi = indicators.includes('rsi') ? computeRsi(data) : null
   const kdj = indicators.includes('kdj') ? computeKdj(data) : null
   const moneyFlow = showMoneyFlow ? buildMoneyFlowSeries(moneyFlowRows) : null
-  const xVolIndex = showSubGrid ? 2 : 1
-  const ySubIndex = showSubGrid ? 1 : -1
-  const yVolIndex = showSubGrid ? 2 : 1
+  const subGridIndex = (key: 'macd' | 'rsi' | 'kdj') => {
+    const idx = subIndicators.indexOf(key)
+    return idx >= 0 ? idx + 1 : -1
+  }
+  const macdGridIndex = subGridIndex('macd')
+  const rsiGridIndex = subGridIndex('rsi')
+  const kdjGridIndex = subGridIndex('kdj')
+  const volumeGridIndex = subIndicators.length + 1
+  const xVolIndex = volumeGridIndex
+  const yVolIndex = volumeGridIndex
 
   const volNeutral = 'rgba(161,161,170,0.5)'
   for (let i = 0; i < data.length; i++) {
@@ -364,7 +372,7 @@ function buildOption(
     }
   }
   const percentAxisShown = isValidPrice(prevClose) && yMin != null && yMax != null
-  const moneyFlowAxisIndex = (showSubGrid ? 3 : 2) + (percentAxisShown ? 1 : 0)
+  const moneyFlowAxisIndex = subIndicators.length + 2 + (percentAxisShown ? 1 : 0)
 
   // x 轴标签: 9:30, 10:30, 11:30/13:00, 14:00, 15:00
   // 11:30(idx 120) 和 13:00(idx 121) 相邻会重叠, 合并为一个标签
@@ -378,6 +386,13 @@ function buildOption(
   const xAxisLabelFormatter = (_value: string, idx: number) => {
     return xAxisLabelMap[idx] ?? ''
   }
+  const panelRight = showMoneyFlow ? 72 : 55
+  const subLayouts: Record<number, { priceBottom: string; subTops: string[]; subBottoms: string[]; volTop: string }> = {
+    1: { priceBottom: '52%', subTops: ['54%'], subBottoms: ['24%'], volTop: '80%' },
+    2: { priceBottom: '60%', subTops: ['42%', '58%'], subBottoms: ['44%', '28%'], volTop: '78%' },
+    3: { priceBottom: '66%', subTops: ['36%', '50%', '64%'], subBottoms: ['52%', '38%', '24%'], volTop: '82%' },
+  }
+  const subLayout = subLayouts[subIndicators.length] ?? subLayouts[3]
 
   return {
     animation: false,
@@ -417,13 +432,13 @@ function buildOption(
     },
     grid: showSubGrid
       ? [
-          { left: 60, right: showMoneyFlow ? 72 : 55, top: 24, bottom: '64%' },
-          { left: 60, right: showMoneyFlow ? 72 : 55, top: '39%', bottom: '26%' },
-          { left: 60, right: showMoneyFlow ? 72 : 55, top: '78%', bottom: 20 },
+          { left: 60, right: panelRight, top: 24, bottom: subLayout.priceBottom },
+          ...subIndicators.map((_, i) => ({ left: 60, right: panelRight, top: subLayout.subTops[i], bottom: subLayout.subBottoms[i] })),
+          { left: 60, right: panelRight, top: subLayout.volTop, bottom: 20 },
         ]
       : [
-          { left: 60, right: showMoneyFlow ? 72 : 55, top: 24, bottom: '28%' },
-          { left: 60, right: showMoneyFlow ? 72 : 55, top: '74%', bottom: 20 },
+          { left: 60, right: panelRight, top: 24, bottom: '28%' },
+          { left: 60, right: panelRight, top: '74%', bottom: 20 },
         ],
     xAxis: [
       {
@@ -461,9 +476,19 @@ function buildOption(
           lineStyle: { color: ct.grid },
         },
       },
+      ...subIndicators.map((_, i) => ({
+        type: 'category' as const,
+        gridIndex: i + 1,
+        data: FULL_DAY_TIMES,
+        boundaryGap: false,
+        axisLine: { show: false },
+        axisLabel: { show: false },
+        axisTick: { show: false },
+        splitLine: { show: false },
+      })),
       {
         type: 'category',
-        gridIndex: 1,
+        gridIndex: volumeGridIndex,
         data: FULL_DAY_TIMES,
         boundaryGap: false,
         axisLine: { show: false },
@@ -471,16 +496,6 @@ function buildOption(
         axisTick: { show: false },
         splitLine: { show: false },
       },
-      ...(showSubGrid ? [{
-        type: 'category' as const,
-        gridIndex: 2,
-        data: FULL_DAY_TIMES,
-        boundaryGap: false,
-        axisLine: { show: false },
-        axisLabel: { show: false },
-        axisTick: { show: false },
-        splitLine: { show: false },
-      }] : []),
     ],
     yAxis: [
       {
@@ -507,30 +522,30 @@ function buildOption(
           formatter: (v: number) => v.toFixed(2),
         },
       },
-      {
+      ...subIndicators.map((_, i) => ({
         scale: true,
-        gridIndex: showSubGrid ? 1 : 1,
+        gridIndex: i + 1,
         splitNumber: 2,
         axisLine: { show: false },
         axisTick: { show: false },
-        splitLine: { lineStyle: { color: showSubGrid ? ct.grid : 'transparent' } },
+        splitLine: { lineStyle: { color: ct.grid } },
         axisLabel: {
-          show: showSubGrid,
+          show: true,
           color: ct.text,
           fontSize: 10,
           fontFamily: 'JetBrains Mono, monospace',
           formatter: (v: number) => Math.abs(v) >= 10 ? v.toFixed(0) : v.toFixed(2),
         },
-      },
-      ...(showSubGrid ? [{
+      })),
+      {
         scale: true,
-        gridIndex: 2,
+        gridIndex: volumeGridIndex,
         splitNumber: 2,
         axisLine: { show: false },
         axisTick: { show: false },
         splitLine: { show: false },
         axisLabel: { show: false },
-      }] : []),
+      },
       ...(percentAxisShown ? [{
         type: 'value' as const,
         position: 'right' as const,
@@ -651,12 +666,12 @@ function buildOption(
           connectNulls: true,
         },
       ] : []),
-      ...(macd && showSubGrid ? [
+      ...(macd && macdGridIndex >= 0 ? [
         {
           name: 'MACD',
           type: 'bar' as const,
-          xAxisIndex: 1,
-          yAxisIndex: ySubIndex,
+          xAxisIndex: macdGridIndex,
+          yAxisIndex: macdGridIndex,
           data: alignByMinute(data, macd.hist).map(v => v == null ? null : {
             value: v,
             itemStyle: { color: v >= 0 ? THEME.volUp : THEME.volDown },
@@ -665,8 +680,8 @@ function buildOption(
         {
           name: 'DIF',
           type: 'line' as const,
-          xAxisIndex: 1,
-          yAxisIndex: ySubIndex,
+          xAxisIndex: macdGridIndex,
+          yAxisIndex: macdGridIndex,
           data: alignByMinute(data, macd.dif),
           symbol: 'none',
           lineStyle: { width: 1, color: '#38BDF8' },
@@ -675,30 +690,30 @@ function buildOption(
         {
           name: 'DEA',
           type: 'line' as const,
-          xAxisIndex: 1,
-          yAxisIndex: ySubIndex,
+          xAxisIndex: macdGridIndex,
+          yAxisIndex: macdGridIndex,
           data: alignByMinute(data, macd.dea),
           symbol: 'none',
           lineStyle: { width: 1, color: '#F97316' },
           connectNulls: true,
         },
       ] : []),
-      ...(rsi && showSubGrid ? [{
+      ...(rsi && rsiGridIndex >= 0 ? [{
         name: 'RSI',
         type: 'line' as const,
-        xAxisIndex: 1,
-        yAxisIndex: ySubIndex,
+        xAxisIndex: rsiGridIndex,
+        yAxisIndex: rsiGridIndex,
         data: alignByMinute(data, rsi),
         symbol: 'none',
         lineStyle: { width: 1, color: '#22C55E' },
         connectNulls: true,
       }] : []),
-      ...(kdj && showSubGrid ? [
+      ...(kdj && kdjGridIndex >= 0 ? [
         {
           name: 'K',
           type: 'line' as const,
-          xAxisIndex: 1,
-          yAxisIndex: ySubIndex,
+          xAxisIndex: kdjGridIndex,
+          yAxisIndex: kdjGridIndex,
           data: alignByMinute(data, kdj.k),
           symbol: 'none',
           lineStyle: { width: 1, color: '#38BDF8' },
@@ -707,8 +722,8 @@ function buildOption(
         {
           name: 'D',
           type: 'line' as const,
-          xAxisIndex: 1,
-          yAxisIndex: ySubIndex,
+          xAxisIndex: kdjGridIndex,
+          yAxisIndex: kdjGridIndex,
           data: alignByMinute(data, kdj.d),
           symbol: 'none',
           lineStyle: { width: 1, color: '#F59E0B' },
@@ -717,8 +732,8 @@ function buildOption(
         {
           name: 'J',
           type: 'line' as const,
-          xAxisIndex: 1,
-          yAxisIndex: ySubIndex,
+          xAxisIndex: kdjGridIndex,
+          yAxisIndex: kdjGridIndex,
           data: alignByMinute(data, kdj.j),
           symbol: 'none',
           lineStyle: { width: 1, color: '#A855F7' },

@@ -171,7 +171,7 @@ export function Positions() {
                   symbol={activeSymbol}
                   date={latestDate}
                   prevClose={prevClose}
-                  height={360}
+                  height={720}
                   indicators={intradayIndicators}
                   moneyFlowRows={transactionQ.data?.rows}
                 />
