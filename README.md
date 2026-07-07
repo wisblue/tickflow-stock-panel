@@ -228,13 +228,25 @@ fork同时请点个star哦,欢迎 Issue 和 PR。
 
 ---
 
+## 💬 交流群
+
+欢迎加入交流群,讨论使用问题、功能建议或量化策略。
+
+<img src="./community-qr-code.jpg" alt="交流群二维码" width="240" />
+
+---
+
 ## ⚠️ 免责声明
 
 本项目仅供**学习与量化研究**,**不构成任何投资建议**。回测结果不代表未来收益。A 股有风险,入市需谨慎。数据准确性以数据源 TickFlow 官方为准。
 
 ## 📄 License
 
-[MIT](./LICENSE) © tickflow-stock-panel contributors · 本项目依赖 [TickFlow](https://tickflow.org/auth/register?ref=V3KDKGXPEA) 提供数据服务,使用前请遵守其服务条款。
+[MIT](./LICENSE) © tickflow-stock-panel contributors 
+
+本项目依赖 [TickFlow](https://tickflow.org/auth/register?ref=V3KDKGXPEA) 提供数据服务,使用前请遵守其服务条款
+
+数据源插件 [stock-sdk](https://stock-sdk.linkdiary.cn) 遵循其各自的 ISC 协议。
 
 ## 社区
 
