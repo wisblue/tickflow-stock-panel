@@ -19,6 +19,7 @@ dependencies = [
     "pyarrow>=16.0",
     "pandas>=2.2",                # 仅在 BacktestService 边界使用,见 §7.4 / ADR-19
     "fastexcel>=0.10",            # Polars 读取 xlsx/xls
+    "redis>=5.0",
     # TickFlow 官方 SDK
     "tickflow[all]>=0.1.23",
     # Scheduling

@@ -18,8 +18,9 @@ import math
 import os
 import re
 import subprocess
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import polars as pl
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -37,6 +38,9 @@ router = APIRouter(prefix="/api/stock-analysis", tags=["stock-analysis"])
 DEFAULT_PREDICTION_ROOT = Path("/home/dennis/re_3/codex/prediction")
 DEFAULT_STOCK_BUY_RANK_PYTHON = Path("/home/dennis/anaconda3/envs/re_3/bin/python")
 DEFAULT_TRANSACTION_ROOT = Path("/home/dennis/historical_transaction")
+DEFAULT_TDX_REDIS_ADDR = "localhost:6379"
+DEFAULT_TDX_REDIS_DB = 15
+MARKET_TZ = ZoneInfo("Asia/Shanghai")
 STOCK_BUY_RANK_COMPARE_PATTERNS = (
     "s112_vs_stock_buy_rank_compare.csv",
     "s114_a_vs_stock_buy_rank_compare.csv",
@@ -425,29 +429,89 @@ def _transaction_trade_date(path: Path) -> str:
     return f"{path.parent.parent.name}{path.parent.name}{path.stem}"
 
 
-def _build_transaction_intraday(symbol: str, trade_date: str | None = None) -> dict:
-    stock = _stock_code(symbol)
-    if not stock:
-        return {"available": False, "message": "symbol 不能为空", "rows": []}
+def _redis_intraday_frame(symbol: str, trade_date: str | None = None) -> tuple[pl.DataFrame | None, str]:
+    try:
+        import redis
+    except ImportError:
+        return None, ""
 
+    addr = os.getenv("TDX_REDIS_ADDR") or os.getenv("REDIS_ADDR") or DEFAULT_TDX_REDIS_ADDR
+    host, _, port_text = addr.partition(":")
+    try:
+        port = int(port_text or "6379")
+        db = int(os.getenv("TDX_REDIS_DB") or os.getenv("REDIS_DB") or DEFAULT_TDX_REDIS_DB)
+        client = redis.Redis(
+            host=host or "localhost",
+            port=port,
+            db=db,
+            password=os.getenv("TDX_REDIS_PASSWORD") or None,
+            socket_connect_timeout=0.2,
+            socket_timeout=0.5,
+            decode_responses=True,
+        )
+        raw = client.get(f"{os.getenv('TDX_REDIS_KEY_PREFIX', 'tdx:trans')}:{symbol}")
+    except Exception as exc:
+        logger.debug("tdx redis read failed for %s: %s", symbol, exc)
+        return None, ""
+
+    if not raw:
+        return None, ""
+
+    records = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if _stock_code(rec.get("symbol")) != symbol:
+            continue
+        ts = _as_float(rec.get("timestamp"))
+        price = _as_float(rec.get("price"))
+        if ts is None or price is None:
+            continue
+        dt = datetime.fromtimestamp(ts, MARKET_TZ)
+        rec_date = dt.strftime("%Y%m%d")
+        if trade_date and rec_date != trade_date:
+            continue
+        records.append({
+            "time_hhmmss": dt.hour * 10000 + dt.minute * 100 + dt.second,
+            "time_text": dt.strftime("%H:%M:%S"),
+            "price": price,
+            "vol": _as_float(rec.get("vol")) or 0.0,
+            "trade_count": max(_as_float(rec.get("num")) or 1.0, 1.0),
+            "bs_flag": _as_int(rec.get("buy_or_sell")) if _as_int(rec.get("buy_or_sell")) is not None else 2,
+            "_trade_date": rec_date,
+        })
+
+    if not records:
+        return None, ""
+    frame = pl.DataFrame(records).sort("time_hhmmss")
+    date_text = trade_date or str(frame["_trade_date"][-1])
+    return frame.drop("_trade_date"), f"redis:{addr}/db{db}/tdx:trans:{symbol}:{date_text}"
+
+
+def _parquet_intraday_frame(symbol: str, trade_date: str | None = None) -> tuple[pl.DataFrame | None, str, str]:
     path = _transaction_path_for_date(trade_date) if trade_date else _latest_transaction_path()
     if path is None or not path.exists():
-        return {"available": False, "message": "暂无 transaction parquet", "rows": []}
+        return None, "", "暂无 transaction parquet"
 
     date_text = trade_date or _transaction_trade_date(path)
     required = ["time_hhmmss", "time_text", "symbol", "stock_code", "price", "vol", "trade_count", "bs_flag"]
     schema = pl.scan_parquet(path).collect_schema()
     available_cols = [col for col in required if col in schema.names()]
     if "symbol" not in available_cols and "stock_code" not in available_cols:
-        return {"available": False, "message": "transaction parquet 缺少 symbol/stock_code", "rows": []}
+        return None, date_text, "transaction parquet 缺少 symbol/stock_code"
 
     symbol_filter = (
-        pl.col("symbol").cast(pl.Utf8).str.extract(r"(\d+)", 1).str.zfill(6).eq(stock)
+        pl.col("symbol").cast(pl.Utf8).str.extract(r"(\d+)", 1).str.zfill(6).eq(symbol)
         if "symbol" in available_cols
         else pl.lit(False)
     )
     stock_code_filter = (
-        pl.col("stock_code").cast(pl.Utf8).str.extract(r"(\d+)", 1).str.zfill(6).eq(stock)
+        pl.col("stock_code").cast(pl.Utf8).str.extract(r"(\d+)", 1).str.zfill(6).eq(symbol)
         if "stock_code" in available_cols
         else pl.lit(False)
     )
@@ -466,6 +530,28 @@ def _build_transaction_intraday(symbol: str, trade_date: str | None = None) -> d
         .sort("time_hhmmss")
         .collect()
     )
+    try:
+        source_path = str(path.relative_to(_transaction_root()))
+    except ValueError:
+        source_path = str(path)
+    return frame, date_text, source_path
+
+
+def _build_transaction_intraday(symbol: str, trade_date: str | None = None) -> dict:
+    stock = _stock_code(symbol)
+    if not stock:
+        return {"available": False, "message": "symbol 不能为空", "rows": []}
+
+    frame, source_path = _redis_intraday_frame(stock, trade_date)
+    date_text = trade_date or ""
+    if frame is not None and not frame.is_empty():
+        if not date_text:
+            date_text = source_path.rsplit(":", 1)[-1]
+    else:
+        frame, date_text, source_path = _parquet_intraday_frame(stock, trade_date)
+        if frame is None:
+            return {"available": False, "message": source_path or "暂无 transaction parquet", "rows": []}
+
     if frame.is_empty():
         return {"available": False, "message": f"{date_text} 未找到 {stock} 的 transaction 数据", "rows": []}
 
@@ -531,10 +617,6 @@ def _build_transaction_intraday(symbol: str, trade_date: str | None = None) -> d
             "trade_count": int(row["trade_count"] or 0),
         })
 
-    try:
-        source_path = str(path.relative_to(_transaction_root()))
-    except ValueError:
-        source_path = str(path)
     return {
         "available": True,
         "message": "",
