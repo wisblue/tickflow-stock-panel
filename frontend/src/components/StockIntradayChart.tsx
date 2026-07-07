@@ -3,7 +3,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Loader2 } from 'lucide-react'
 import { api, type MinuteKlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
-import { EChartsIntraday } from '@/components/EChartsIntraday'
+import { EChartsIntraday, type IntradayIndicator } from '@/components/EChartsIntraday'
+import type { TransactionIntradayRow } from '@/lib/api'
 
 interface Props {
   symbol: string
@@ -12,6 +13,8 @@ interface Props {
   prevClose?: number
   className?: string
   onPriceHover?: (price: number | null) => void
+  indicators?: IntradayIndicator[]
+  moneyFlowRows?: TransactionIntradayRow[]
 }
 
 export function StockIntradayChart({
@@ -21,6 +24,8 @@ export function StockIntradayChart({
   prevClose,
   className,
   onPriceHover,
+  indicators,
+  moneyFlowRows,
 }: Props) {
   const qc = useQueryClient()
   const [minuteDismissed, setMinuteDismissed] = useState(false)
@@ -113,6 +118,8 @@ export function StockIntradayChart({
           date={date}
           symbol={symbol}
           onPriceHover={onPriceHover}
+          indicators={indicators}
+          moneyFlowRows={moneyFlowRows}
         />
       )}
     </div>

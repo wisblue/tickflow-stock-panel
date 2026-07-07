@@ -6,6 +6,7 @@ import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { StockDailyKChart, type StockDailyKChartResult } from '@/components/StockDailyKChart'
 import { StockIntradayChart } from '@/components/StockIntradayChart'
+import type { IntradayIndicator } from '@/components/EChartsIntraday'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import {
@@ -23,6 +24,7 @@ export function Positions() {
   const [positions, setPositions] = useState<PositionStock[]>(() => loadPositions())
   const [activeSymbol, setActiveSymbol] = useState(() => getActivePositionSymbol())
   const [chartInfo, setChartInfo] = useState<StockDailyKChartResult | null>(null)
+  const [intradayIndicators, setIntradayIndicators] = useState<IntradayIndicator[]>([])
 
   const refreshLocal = useCallback(() => {
     const nextRows = loadPositions()
@@ -75,6 +77,16 @@ export function Positions() {
 
   const latestDate = chartInfo?.rows?.at(-1)?.date ?? null
   const prevClose = chartInfo?.rawRows?.at(-2)?.close
+  const moneyFlowEnabled = intradayIndicators.includes('moneyflow')
+  const transactionQ = useQuery({
+    queryKey: QK.transactionIntraday(activeSymbol, latestDate ?? ''),
+    queryFn: () => api.transactionIntraday(activeSymbol, latestDate?.replaceAll('-', '')),
+    enabled: !!activeSymbol && !!latestDate && moneyFlowEnabled,
+    staleTime: 30_000,
+  })
+  const toggleIntradayIndicator = useCallback((key: IntradayIndicator) => {
+    setIntradayIndicators(prev => prev.includes(key) ? prev.filter(item => item !== key) : [...prev, key])
+  }, [])
 
   return (
     <div className="flex flex-col h-full">
@@ -139,13 +151,43 @@ export function Positions() {
             </section>
 
             <section className="rounded-card border border-border/60 bg-surface/40 overflow-hidden">
-              <div className="border-b border-border/40 px-4 py-3 text-sm font-medium text-foreground">分时线</div>
+              <div className="flex items-center justify-between gap-3 border-b border-border/40 px-4 py-3">
+                <span className="text-sm font-medium text-foreground">分时线</span>
+                <div className="flex items-center gap-1.5">
+                  {(['macd', 'rsi', 'kdj', 'boll', 'moneyflow'] as const).map(key => {
+                    const active = intradayIndicators.includes(key)
+                    const labelMap: Record<IntradayIndicator, string> = {
+                      macd: 'MACD',
+                      rsi: 'RSI',
+                      kdj: 'KDJ',
+                      boll: 'BOLL',
+                      moneyflow: '资金',
+                    }
+                    return (
+                      <button
+                        key={key}
+                        onClick={() => toggleIntradayIndicator(key)}
+                        className={`rounded px-2 py-0.5 text-[10px] font-mono transition-colors ${
+                          active
+                            ? 'bg-accent/20 text-accent'
+                            : 'bg-elevated text-muted hover:text-secondary'
+                        }`}
+                      >
+                        {labelMap[key]}
+                      </button>
+                    )
+                  })}
+                  {transactionQ.isFetching && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted" />}
+                </div>
+              </div>
               <div className="p-3">
                 <StockIntradayChart
                   symbol={activeSymbol}
                   date={latestDate}
                   prevClose={prevClose}
                   height={360}
+                  indicators={intradayIndicators}
+                  moneyFlowRows={transactionQ.data?.rows}
                 />
               </div>
             </section>

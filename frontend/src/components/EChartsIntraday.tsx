@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
-import type { MinuteKlineRow } from '@/lib/api'
+import type { MinuteKlineRow, TransactionIntradayRow } from '@/lib/api'
 import { useChartTheme, type ChartTheme } from '@/lib/theme'
 
 type YMode = 'adaptive' | 'limit'
+export type IntradayIndicator = 'macd' | 'rsi' | 'kdj' | 'boll' | 'moneyflow'
 
 // 序列颜色 (双主题通用); 画布轴/网格/十字线等主题相关色走 ChartTheme
 const THEME = {
@@ -24,6 +25,8 @@ interface Props {
   onPriceHover?: (price: number | null) => void
   showLimitLines?: boolean
   showAvgLine?: boolean
+  indicators?: IntradayIndicator[]
+  moneyFlowRows?: TransactionIntradayRow[]
 }
 
 function fmtTime(dt: string): string {
@@ -79,6 +82,135 @@ function generateFullDayTimes(): string[] {
 
 const FULL_DAY_TIMES = generateFullDayTimes()
 
+function alignByMinute<T>(data: MinuteKlineRow[], values: T[]): (T | null)[] {
+  const timeIndexMap = new Map(FULL_DAY_TIMES.map((t, i) => [t, i]))
+  const out = new Array(FULL_DAY_TIMES.length).fill(null) as (T | null)[]
+  for (let i = 0; i < data.length; i++) {
+    const idx = timeIndexMap.get(fmtTime(data[i].datetime))
+    if (idx !== undefined) out[idx] = values[i]
+  }
+  return out
+}
+
+function ema(values: number[], period: number): number[] {
+  const k = 2 / (period + 1)
+  const out: number[] = []
+  for (let i = 0; i < values.length; i++) {
+    out.push(i === 0 ? values[i] : values[i] * k + out[i - 1] * (1 - k))
+  }
+  return out
+}
+
+function rollingMean(values: number[], period: number): (number | null)[] {
+  const out: (number | null)[] = []
+  let sum = 0
+  for (let i = 0; i < values.length; i++) {
+    sum += values[i]
+    if (i >= period) sum -= values[i - period]
+    out.push(i >= period - 1 ? sum / period : null)
+  }
+  return out
+}
+
+function rollingStd(values: number[], means: (number | null)[], period: number): (number | null)[] {
+  return values.map((_, i) => {
+    const mean = means[i]
+    if (mean == null || i < period - 1) return null
+    let variance = 0
+    for (let j = i - period + 1; j <= i; j++) {
+      variance += Math.pow(values[j] - mean, 2)
+    }
+    return Math.sqrt(variance / period)
+  })
+}
+
+function computeMacd(data: MinuteKlineRow[]) {
+  const closes = data.map(d => d.close)
+  const fast = ema(closes, 12)
+  const slow = ema(closes, 26)
+  const dif = closes.map((_, i) => fast[i] - slow[i])
+  const dea = ema(dif, 9)
+  const hist = dif.map((v, i) => (v - dea[i]) * 2)
+  return { dif, dea, hist }
+}
+
+function computeRsi(data: MinuteKlineRow[], period = 14): (number | null)[] {
+  const closes = data.map(d => d.close)
+  const out: (number | null)[] = []
+  let gain = 0
+  let loss = 0
+  for (let i = 0; i < closes.length; i++) {
+    if (i === 0) {
+      out.push(null)
+      continue
+    }
+    const chg = closes[i] - closes[i - 1]
+    const up = Math.max(chg, 0)
+    const down = Math.max(-chg, 0)
+    if (i <= period) {
+      gain += up
+      loss += down
+      out.push(i === period ? 100 - 100 / (1 + (gain / period) / Math.max(loss / period, 1e-9)) : null)
+    } else {
+      gain = (gain * (period - 1) + up) / period
+      loss = (loss * (period - 1) + down) / period
+      out.push(100 - 100 / (1 + gain / Math.max(loss, 1e-9)))
+    }
+  }
+  return out
+}
+
+function computeKdj(data: MinuteKlineRow[], period = 9) {
+  const k: (number | null)[] = []
+  const d: (number | null)[] = []
+  const j: (number | null)[] = []
+  let prevK = 50
+  let prevD = 50
+  for (let i = 0; i < data.length; i++) {
+    if (i < period - 1) {
+      k.push(null); d.push(null); j.push(null)
+      continue
+    }
+    const slice = data.slice(i - period + 1, i + 1)
+    const low = Math.min(...slice.map(r => r.low))
+    const high = Math.max(...slice.map(r => r.high))
+    const rsv = high === low ? 50 : (data[i].close - low) / (high - low) * 100
+    prevK = prevK * 2 / 3 + rsv / 3
+    prevD = prevD * 2 / 3 + prevK / 3
+    k.push(prevK)
+    d.push(prevD)
+    j.push(3 * prevK - 2 * prevD)
+  }
+  return { k, d, j }
+}
+
+function computeBoll(data: MinuteKlineRow[]) {
+  const closes = data.map(d => d.close)
+  const mid = rollingMean(closes, 20)
+  const std = rollingStd(closes, mid, 20)
+  return {
+    mid,
+    upper: mid.map((v, i) => v == null || std[i] == null ? null : v + 2 * std[i]!),
+    lower: mid.map((v, i) => v == null || std[i] == null ? null : v - 2 * std[i]!),
+  }
+}
+
+function buildMoneyFlowSeries(rows: TransactionIntradayRow[] | undefined): { full: (number | null)[]; main: (number | null)[] } {
+  const full = new Array(FULL_DAY_TIMES.length).fill(null) as (number | null)[]
+  const main = new Array(FULL_DAY_TIMES.length).fill(null) as (number | null)[]
+  const timeIndexMap = new Map(FULL_DAY_TIMES.map((t, i) => [t, i]))
+  for (const row of rows ?? []) {
+    if (row.time_hhmmss > 150000) continue
+    const hh = Math.floor(row.time_hhmmss / 10000)
+    const mm = Math.floor(row.time_hhmmss / 100) % 100
+    const idx = timeIndexMap.get(`${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`)
+    if (idx === undefined) continue
+    full[idx] = row.full_net_w
+    main[idx] = row.main_net_w
+  }
+  return { full, main }
+}
+
 /** 根据 symbol 判断涨跌停幅度 (创业板/科创板 ±20%, 北交所 ±30%, 其余 ±10%) */
 function getLimitPct(symbol?: string): number {
   if (!symbol) return 0.10
@@ -106,7 +238,20 @@ function getLimitPrices(prevClose: number, symbol?: string): {
   return { limitUp, limitDown, upPct, downPct }
 }
 
-function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgPrices: number[], lineColor: string, areaColor: string, yMode: YMode, ct: ChartTheme, symbol?: string, showLimitLines = true, showAvgLine = true): EChartsOption {
+function buildOption(
+  data: MinuteKlineRow[],
+  prevClose: number | undefined,
+  avgPrices: number[],
+  lineColor: string,
+  areaColor: string,
+  yMode: YMode,
+  ct: ChartTheme,
+  symbol?: string,
+  showLimitLines = true,
+  showAvgLine = true,
+  indicators: IntradayIndicator[] = [],
+  moneyFlowRows?: TransactionIntradayRow[],
+): EChartsOption {
   // 将数据映射到全天时间轴上的正确位置
   const timeIndexMap = new Map(FULL_DAY_TIMES.map((t, i) => [t, i]))
   const closes = new Array(FULL_DAY_TIMES.length).fill(null) as (number | null)[]
@@ -114,6 +259,16 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
   const lows = new Array(FULL_DAY_TIMES.length).fill(null) as (number | null)[]
   const avgData = new Array(FULL_DAY_TIMES.length).fill(null) as (number | null)[]
   const volumes = new Array(FULL_DAY_TIMES.length).fill(null) as (any | null)[]
+  const showSubGrid = indicators.some(key => key === 'macd' || key === 'rsi' || key === 'kdj')
+  const showMoneyFlow = indicators.includes('moneyflow')
+  const boll = indicators.includes('boll') ? computeBoll(data) : null
+  const macd = indicators.includes('macd') ? computeMacd(data) : null
+  const rsi = indicators.includes('rsi') ? computeRsi(data) : null
+  const kdj = indicators.includes('kdj') ? computeKdj(data) : null
+  const moneyFlow = showMoneyFlow ? buildMoneyFlowSeries(moneyFlowRows) : null
+  const xVolIndex = showSubGrid ? 2 : 1
+  const ySubIndex = showSubGrid ? 1 : -1
+  const yVolIndex = showSubGrid ? 2 : 1
 
   const volNeutral = 'rgba(161,161,170,0.5)'
   for (let i = 0; i < data.length; i++) {
@@ -208,6 +363,8 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
       yMax = prevClose + maxDiff
     }
   }
+  const percentAxisShown = isValidPrice(prevClose) && yMin != null && yMax != null
+  const moneyFlowAxisIndex = (showSubGrid ? 3 : 2) + (percentAxisShown ? 1 : 0)
 
   // x 轴标签: 9:30, 10:30, 11:30/13:00, 14:00, 15:00
   // 11:30(idx 120) 和 13:00(idx 121) 相邻会重叠, 合并为一个标签
@@ -250,10 +407,24 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
     axisPointer: {
       link: [{ xAxisIndex: 'all' }],
     },
-    grid: [
-      { left: 60, right: 55, top: 24, bottom: '28%' },
-      { left: 60, right: 55, top: '74%', bottom: 20 },
-    ],
+    legend: {
+      show: showMoneyFlow,
+      left: 60,
+      top: 0,
+      itemWidth: 12,
+      itemHeight: 6,
+      textStyle: { color: ct.text, fontSize: 10 },
+    },
+    grid: showSubGrid
+      ? [
+          { left: 60, right: showMoneyFlow ? 72 : 55, top: 24, bottom: '46%' },
+          { left: 60, right: showMoneyFlow ? 72 : 55, top: '58%', bottom: '24%' },
+          { left: 60, right: showMoneyFlow ? 72 : 55, top: '80%', bottom: 20 },
+        ]
+      : [
+          { left: 60, right: showMoneyFlow ? 72 : 55, top: 24, bottom: '28%' },
+          { left: 60, right: showMoneyFlow ? 72 : 55, top: '74%', bottom: 20 },
+        ],
     xAxis: [
       {
         type: 'category',
@@ -300,6 +471,16 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         axisTick: { show: false },
         splitLine: { show: false },
       },
+      ...(showSubGrid ? [{
+        type: 'category' as const,
+        gridIndex: 2,
+        data: FULL_DAY_TIMES,
+        boundaryGap: false,
+        axisLine: { show: false },
+        axisLabel: { show: false },
+        axisTick: { show: false },
+        splitLine: { show: false },
+      }] : []),
     ],
     yAxis: [
       {
@@ -328,14 +509,29 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
       },
       {
         scale: true,
-        gridIndex: 1,
+        gridIndex: showSubGrid ? 1 : 1,
+        splitNumber: 2,
+        axisLine: { show: false },
+        axisTick: { show: false },
+        splitLine: { lineStyle: { color: showSubGrid ? ct.grid : 'transparent' } },
+        axisLabel: {
+          show: showSubGrid,
+          color: ct.text,
+          fontSize: 10,
+          fontFamily: 'JetBrains Mono, monospace',
+          formatter: (v: number) => Math.abs(v) >= 10 ? v.toFixed(0) : v.toFixed(2),
+        },
+      },
+      ...(showSubGrid ? [{
+        scale: true,
+        gridIndex: 2,
         splitNumber: 2,
         axisLine: { show: false },
         axisTick: { show: false },
         splitLine: { show: false },
         axisLabel: { show: false },
-      },
-      ...(isValidPrice(prevClose) && yMin != null && yMax != null ? [{
+      }] : []),
+      ...(percentAxisShown ? [{
         type: 'value' as const,
         position: 'right' as const,
         gridIndex: 0,
@@ -368,6 +564,21 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
           },
         },
       }] : []),
+      ...(showMoneyFlow ? [{
+        type: 'value' as const,
+        position: 'right' as const,
+        gridIndex: 0,
+        scale: true,
+        splitLine: { show: false },
+        axisLine: { show: false },
+        axisTick: { show: false },
+        axisLabel: {
+          color: ct.text,
+          fontSize: 10,
+          fontFamily: 'JetBrains Mono, monospace',
+          formatter: (v: number) => Math.abs(v) >= 10000 ? `${Math.round(v / 10000)}亿` : `${Math.round(v)}w`,
+        },
+      }] : []),
     ],
     series: [
       {
@@ -392,19 +603,152 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         lineStyle: { width: 1, color: THEME.avgLine },
         connectNulls: true,
       }] : []),
+      ...(boll ? [
+        {
+          name: 'BOLL上',
+          type: 'line' as const,
+          data: alignByMinute(data, boll.upper),
+          symbol: 'none',
+          lineStyle: { width: 0.8, color: '#A855F7', opacity: 0.85 },
+          connectNulls: true,
+        },
+        {
+          name: 'BOLL中',
+          type: 'line' as const,
+          data: alignByMinute(data, boll.mid),
+          symbol: 'none',
+          lineStyle: { width: 0.8, color: '#94A3B8', opacity: 0.75 },
+          connectNulls: true,
+        },
+        {
+          name: 'BOLL下',
+          type: 'line' as const,
+          data: alignByMinute(data, boll.lower),
+          symbol: 'none',
+          lineStyle: { width: 0.8, color: '#A855F7', opacity: 0.85 },
+          connectNulls: true,
+        },
+      ] : []),
+      ...(showMoneyFlow && moneyFlow ? [
+        {
+          name: '全量资金',
+          type: 'line' as const,
+          yAxisIndex: moneyFlowAxisIndex,
+          data: moneyFlow.full,
+          smooth: false,
+          symbol: 'none',
+          lineStyle: { width: 1, color: '#F59E0B' },
+          connectNulls: true,
+        },
+        {
+          name: '主力净额',
+          type: 'line' as const,
+          yAxisIndex: moneyFlowAxisIndex,
+          data: moneyFlow.main,
+          smooth: false,
+          symbol: 'none',
+          lineStyle: { width: 1, color: '#EF4444' },
+          connectNulls: true,
+        },
+      ] : []),
+      ...(macd && showSubGrid ? [
+        {
+          name: 'MACD',
+          type: 'bar' as const,
+          xAxisIndex: 1,
+          yAxisIndex: ySubIndex,
+          data: alignByMinute(data, macd.hist).map(v => v == null ? null : {
+            value: v,
+            itemStyle: { color: v >= 0 ? THEME.volUp : THEME.volDown },
+          }),
+        },
+        {
+          name: 'DIF',
+          type: 'line' as const,
+          xAxisIndex: 1,
+          yAxisIndex: ySubIndex,
+          data: alignByMinute(data, macd.dif),
+          symbol: 'none',
+          lineStyle: { width: 1, color: '#38BDF8' },
+          connectNulls: true,
+        },
+        {
+          name: 'DEA',
+          type: 'line' as const,
+          xAxisIndex: 1,
+          yAxisIndex: ySubIndex,
+          data: alignByMinute(data, macd.dea),
+          symbol: 'none',
+          lineStyle: { width: 1, color: '#F97316' },
+          connectNulls: true,
+        },
+      ] : []),
+      ...(rsi && showSubGrid ? [{
+        name: 'RSI',
+        type: 'line' as const,
+        xAxisIndex: 1,
+        yAxisIndex: ySubIndex,
+        data: alignByMinute(data, rsi),
+        symbol: 'none',
+        lineStyle: { width: 1, color: '#22C55E' },
+        connectNulls: true,
+      }] : []),
+      ...(kdj && showSubGrid ? [
+        {
+          name: 'K',
+          type: 'line' as const,
+          xAxisIndex: 1,
+          yAxisIndex: ySubIndex,
+          data: alignByMinute(data, kdj.k),
+          symbol: 'none',
+          lineStyle: { width: 1, color: '#38BDF8' },
+          connectNulls: true,
+        },
+        {
+          name: 'D',
+          type: 'line' as const,
+          xAxisIndex: 1,
+          yAxisIndex: ySubIndex,
+          data: alignByMinute(data, kdj.d),
+          symbol: 'none',
+          lineStyle: { width: 1, color: '#F59E0B' },
+          connectNulls: true,
+        },
+        {
+          name: 'J',
+          type: 'line' as const,
+          xAxisIndex: 1,
+          yAxisIndex: ySubIndex,
+          data: alignByMinute(data, kdj.j),
+          symbol: 'none',
+          lineStyle: { width: 1, color: '#A855F7' },
+          connectNulls: true,
+        },
+      ] : []),
       {
         name: '成交量',
         type: 'bar',
         data: volumes,
-        xAxisIndex: 1,
-        yAxisIndex: 1,
+        xAxisIndex: xVolIndex,
+        yAxisIndex: yVolIndex,
         cursor: 'crosshair',
       },
     ],
   }
 }
 
-export function EChartsIntraday({ data, height = 320, prevClose, date, symbol, onPriceHover, showLimitLines = true, showAvgLine = true }: Props) {
+export function EChartsIntraday({
+  data,
+  height = 320,
+  prevClose,
+  date,
+  symbol,
+  onPriceHover,
+  showLimitLines = true,
+  showAvgLine = true,
+  indicators = [],
+  moneyFlowRows,
+}: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<ECharts | null>(null)
   const roRef = useRef<ResizeObserver | null>(null)
@@ -493,11 +837,11 @@ export function EChartsIntraday({ data, height = 320, prevClose, date, symbol, o
       }
       fullDayToDataIdx.current = mapping
 
-      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, symbol, showLimitLines, showAvgLine), true)
+      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, symbol, showLimitLines, showAvgLine, indicators, moneyFlowRows), true)
     } else {
       chart.clear()
     }
-  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, symbol, showLimitLines, showAvgLine])
+  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, symbol, showLimitLines, showAvgLine, indicators, moneyFlowRows])
 
   useEffect(() => {
     return () => {
