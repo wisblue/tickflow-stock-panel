@@ -631,7 +631,7 @@ function buildOption(
       ] : []),
       ...(showMoneyFlow && moneyFlow ? [
         {
-          name: '全量资金',
+          name: '全量净额',
           type: 'line' as const,
           yAxisIndex: moneyFlowAxisIndex,
           data: moneyFlow.full,
