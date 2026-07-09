@@ -386,7 +386,9 @@ function buildOption(
   const xAxisLabelFormatter = (_value: string, idx: number) => {
     return xAxisLabelMap[idx] ?? ''
   }
-  const panelRight = showMoneyFlow ? 72 : 55
+  const hasDualRightAxes = percentAxisShown && showMoneyFlow
+  const moneyFlowAxisOffset = hasDualRightAxes ? 58 : 0
+  const panelRight = hasDualRightAxes ? 118 : showMoneyFlow ? 72 : 55
   const subLayouts: Record<number, { priceBottom: string; subTops: string[]; subBottoms: string[]; volTop: string }> = {
     1: { priceBottom: '52%', subTops: ['54%'], subBottoms: ['24%'], volTop: '80%' },
     2: { priceBottom: '60%', subTops: ['42%', '58%'], subBottoms: ['44%', '28%'], volTop: '78%' },
@@ -582,6 +584,7 @@ function buildOption(
       ...(showMoneyFlow ? [{
         type: 'value' as const,
         position: 'right' as const,
+        offset: moneyFlowAxisOffset,
         gridIndex: 0,
         scale: true,
         splitLine: { show: false },
