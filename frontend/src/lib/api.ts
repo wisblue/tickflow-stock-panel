@@ -1290,6 +1290,24 @@ export const api = {
         : '/api/watchlist/enriched',
     ),
 
+  activeStocksList: () =>
+    request<{ symbols: WatchlistEntry[]; active_symbols_file: string }>('/api/active-stocks'),
+  activeStockAdd: (symbol: string, name = '', source = 'manual') =>
+    request<{ symbols: WatchlistEntry[]; active_symbols_file: string }>('/api/active-stocks', {
+      method: 'POST',
+      body: JSON.stringify({ symbol, name, source }),
+    }),
+  activeStocksBatchAdd: (symbols: string[], source = 'manual') =>
+    request<{ symbols: WatchlistEntry[]; active_symbols_file: string }>('/api/active-stocks/batch', {
+      method: 'POST',
+      body: JSON.stringify({ symbols, source }),
+    }),
+  activeStockRemove: (symbol: string) =>
+    request<{ symbols: WatchlistEntry[]; active_symbols_file: string }>(
+      `/api/active-stocks/${encodeURIComponent(symbol)}`,
+      { method: 'DELETE' },
+    ),
+
   screenerStrategies: () => request<{ presets: ScreenerStrategy[]; load_errors?: StrategyLoadError[] }>('/api/screener/strategies'),
   screenerRunPreset: (strategy_id: string, pool?: string[], asOf?: string, extColumns?: string) =>
     request<ScreenerResult>('/api/screener/run_preset', {

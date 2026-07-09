@@ -10,7 +10,7 @@ import polars as pl
 from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel
 
-from app.services import watchlist
+from app.services import active_stocks, watchlist
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,7 @@ def list_all(request: Request):
 @router.post("")
 def add_one(req: AddRequest, request: Request):
     rows = watchlist.add(req.symbol, req.note)
+    active_stocks.add(req.symbol, source="watchlist")
     return {"symbols": _with_names(rows, request)}
 
 
@@ -56,6 +57,7 @@ def add_one(req: AddRequest, request: Request):
 def add_batch(req: BatchAddRequest, request: Request):
     for sym in req.symbols:
         watchlist.add(sym, req.note)
+    active_stocks.add_many(req.symbols, source="watchlist")
     return {"symbols": _with_names(watchlist.list_symbols(), request), "added": len(req.symbols)}
 
 

@@ -27,8 +27,9 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from app.config import settings
 from app.indicators.levels import compute_levels, summarize_levels
-from app.services import stock_reports
+from app.services import active_stocks, stock_reports
 from app.services.stock_analyzer import analyze_stock_stream
 
 logger = logging.getLogger(__name__)
@@ -435,21 +436,22 @@ def _redis_intraday_frame(symbol: str, trade_date: str | None = None) -> tuple[p
     except ImportError:
         return None, ""
 
-    addr = os.getenv("TDX_REDIS_ADDR") or os.getenv("REDIS_ADDR") or DEFAULT_TDX_REDIS_ADDR
+    addr = os.getenv("TDX_REDIS_ADDR") or os.getenv("REDIS_ADDR") or settings.tdx_redis_addr or DEFAULT_TDX_REDIS_ADDR
     host, _, port_text = addr.partition(":")
     try:
         port = int(port_text or "6379")
-        db = int(os.getenv("TDX_REDIS_DB") or os.getenv("REDIS_DB") or DEFAULT_TDX_REDIS_DB)
+        db = int(os.getenv("TDX_REDIS_DB") or os.getenv("REDIS_DB") or settings.tdx_redis_db or DEFAULT_TDX_REDIS_DB)
         client = redis.Redis(
             host=host or "localhost",
             port=port,
             db=db,
-            password=os.getenv("TDX_REDIS_PASSWORD") or None,
+            password=os.getenv("TDX_REDIS_PASSWORD") or settings.tdx_redis_password or None,
             socket_connect_timeout=0.2,
             socket_timeout=0.5,
             decode_responses=True,
         )
-        raw = client.get(f"{os.getenv('TDX_REDIS_KEY_PREFIX', 'tdx:trans')}:{symbol}")
+        key_prefix = os.getenv("TDX_REDIS_KEY_PREFIX") or settings.tdx_redis_key_prefix or "tdx:trans"
+        raw = client.get(f"{key_prefix}:{symbol}")
     except Exception as exc:
         logger.debug("tdx redis read failed for %s: %s", symbol, exc)
         return None, ""
@@ -834,6 +836,8 @@ def get_levels(
 def get_stock_buy_rank(symbol: str = Query("", description="可选:优先返回包含该股票的最新输出")):
     """读取 prediction 工作区内 stock-buy-rank 输出。"""
     try:
+        if symbol:
+            active_stocks.add(symbol, source="stock-analysis")
         return _read_stock_buy_rank_artifact(symbol or None)
     except Exception as exc:  # noqa: BLE001
         logger.exception("stock-buy-rank artifact read failed")
@@ -847,6 +851,7 @@ def get_transaction_intraday(
 ):
     """从最新 historical_transaction parquet 构建分时价格/全量主动净额/主力净额序列。"""
     try:
+        active_stocks.add(symbol, source="stock-analysis")
         return _build_transaction_intraday(symbol, trade_date or None)
     except Exception as exc:  # noqa: BLE001
         logger.exception("transaction intraday read failed")

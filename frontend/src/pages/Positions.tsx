@@ -55,18 +55,35 @@ export function Positions() {
     [activeSymbol, positions],
   )
 
+  const registerActiveStock = useCallback((symbol: string, name = '') => {
+    if (!symbol) return
+    api.activeStockAdd(symbol, name, 'positions').catch((error) => {
+      console.warn('register active stock failed', error)
+    })
+  }, [])
+
+  useEffect(() => {
+    if (positions.length === 0) return
+    api.activeStocksBatchAdd(positions.map((row) => row.symbol), 'positions').catch((error) => {
+      console.warn('sync positions active stocks failed', error)
+    })
+  }, [positions])
+
   const activate = useCallback((symbol: string) => {
     if (!symbol) return
+    const row = positions.find(item => item.symbol === symbol)
+    registerActiveStock(symbol, row?.name || '')
     setActivePositionSymbol(symbol)
     setActiveSymbol(symbol)
     setChartInfo(null)
     setSearchParams({ symbol })
-  }, [setSearchParams])
+  }, [positions, registerActiveStock, setSearchParams])
 
   const addStock = useCallback((symbol: string, name: string) => {
     addPositionStock(symbol, name)
+    registerActiveStock(symbol, name)
     setSearchParams({ symbol })
-  }, [setSearchParams])
+  }, [registerActiveStock, setSearchParams])
 
   const removeStock = useCallback((symbol: string) => {
     const next = removePositionStock(symbol)
@@ -79,10 +96,11 @@ export function Positions() {
   const prevClose = chartInfo?.rawRows?.at(-2)?.close
   const moneyFlowEnabled = intradayIndicators.includes('moneyflow')
   const transactionQ = useQuery({
-    queryKey: QK.transactionIntraday(activeSymbol, latestDate ?? ''),
-    queryFn: () => api.transactionIntraday(activeSymbol, latestDate?.replaceAll('-', '')),
-    enabled: !!activeSymbol && !!latestDate && moneyFlowEnabled,
-    staleTime: 30_000,
+    queryKey: QK.transactionIntraday(activeSymbol),
+    queryFn: () => api.transactionIntraday(activeSymbol),
+    enabled: !!activeSymbol && moneyFlowEnabled,
+    staleTime: 0,
+    refetchInterval: moneyFlowEnabled ? 5_000 : false,
   })
   const toggleIntradayIndicator = useCallback((key: IntradayIndicator) => {
     setIntradayIndicators(prev => prev.includes(key) ? prev.filter(item => item !== key) : [...prev, key])

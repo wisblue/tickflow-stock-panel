@@ -199,6 +199,7 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
     queryFn: () => api.transactionIntraday(symbol),
     enabled: !!symbol,
     staleTime: 30_000,
+    refetchInterval: 5_000,
   })
 
   if (kline.isLoading) {

@@ -95,6 +95,12 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     backtest_range_guard: bool = False
 
+    # Realtime transaction Redis (go-fetcher writes tdx:trans:{symbol})
+    tdx_redis_addr: str = "localhost:6379"
+    tdx_redis_db: int = 15
+    tdx_redis_password: str = ""
+    tdx_redis_key_prefix: str = "tdx:trans"
+
     # Auth — 首次启动时预置访问密码(明文, 仅用于初始化, 详见 services/auth.bootstrap_from_env)
     # 公网服务器部署时免去 SSH 端口转发设密码的麻烦。写入 auth.json(哈希)后即不再读取。
     auth_password: str = ""
