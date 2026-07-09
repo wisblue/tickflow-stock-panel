@@ -39,8 +39,35 @@ def save(updates: dict) -> dict:
     return current
 
 
+def clear(*keys: str) -> dict:
+    """删除指定偏好字段。返回新内容。"""
+    current = load()
+    for key in keys:
+        current.pop(key, None)
+    _path().write_text(
+        json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8",
+    )
+    return current
+
+
 def get_realtime_quotes_enabled() -> bool:
-    return load().get("realtime_quotes_enabled", False)
+    try:
+        from app.services.quote_service import QuoteService
+        allowed = QuoteService.is_realtime_allowed()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("resolve realtime quote permission failed: %s", e)
+        return False
+    if not allowed:
+        return False
+    prefs = load()
+    if "realtime_quotes_enabled" in prefs:
+        return bool(prefs["realtime_quotes_enabled"])
+    try:
+        from app import secrets_store
+        return bool(secrets_store.get_tickflow_key())
+    except Exception as e:  # noqa: BLE001
+        logger.warning("resolve realtime quote default failed: %s", e)
+        return False
 
 
 def get_indices_nav_pinned() -> bool:

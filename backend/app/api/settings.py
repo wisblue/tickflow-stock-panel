@@ -44,6 +44,25 @@ def _sync_financial_scheduler_caps(app_state, capset) -> None:
         logging.getLogger(__name__).warning("update financial_scheduler capabilities failed: %s", e)
 
 
+def _sync_realtime_quote_default(app_state, *, force_off: bool = False) -> None:
+    """Apply the implicit realtime default after TickFlow key changes."""
+    from app.services import preferences
+    qs = getattr(app_state, "quote_service", None)
+    prefs = preferences.load()
+    had_explicit_quote_pref = "realtime_quotes_enabled" in prefs
+    if force_off:
+        if qs:
+            qs.disable()
+        if not had_explicit_quote_pref:
+            preferences.clear("realtime_quotes_enabled")
+        return
+    if had_explicit_quote_pref:
+        return
+    enabled = preferences.get_realtime_quotes_enabled()
+    if qs and enabled:
+        qs.enable()
+
+
 class TickflowKeyIn(BaseModel):
     api_key: str
 
@@ -149,6 +168,7 @@ def save_tickflow_key(req: TickflowKeyIn, request: Request) -> dict:
         capset = detect_capabilities(force=True)
         request.app.state.capabilities = capset
         _sync_financial_scheduler_caps(request.app.state, capset)
+        _sync_realtime_quote_default(request.app.state, force_off=True)
         return {
             "ok": False,
             "reason": "invalid",
@@ -165,6 +185,7 @@ def save_tickflow_key(req: TickflowKeyIn, request: Request) -> dict:
         # 免费档运行时走 free-api 服务器,清除付费端点的自定义配置
         secrets_store.clear("tickflow_base_url")
         tf_client.reset_clients()
+        _sync_realtime_quote_default(request.app.state)
         return {
             "ok": True,
             "tickflow_api_key_masked": secrets_store.mask(key),
@@ -181,6 +202,7 @@ def save_tickflow_key(req: TickflowKeyIn, request: Request) -> dict:
     if not base:
         secrets_store.save({"tickflow_base_url": DEFAULT_PAID_ENDPOINT})
     tf_client.reset_clients()
+    _sync_realtime_quote_default(request.app.state)
 
     return {
         "ok": True,
@@ -206,6 +228,7 @@ def clear_tickflow_key(request: Request) -> dict:
     capset = detect_capabilities(force=True)
     request.app.state.capabilities = capset
     _sync_financial_scheduler_caps(request.app.state, capset)
+    _sync_realtime_quote_default(request.app.state, force_off=True)
 
     return {
         "ok": True,
@@ -1300,4 +1323,3 @@ def update_review_push(req: ReviewPushIn) -> dict:
     from app.services import preferences
     saved = preferences.set_review_push_channels(req.channels)
     return {"review_push_channels": saved}
-
