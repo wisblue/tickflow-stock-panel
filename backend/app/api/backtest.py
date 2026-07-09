@@ -3,10 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import queue
+import re
 import threading
 from dataclasses import asdict
 from datetime import date, timedelta
+from pathlib import Path
+from typing import Any
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
@@ -31,6 +35,9 @@ BACKTEST_SERVER_GUARD_MESSAGE = (
     "当前服务器内存约 1.8GB，回测区间最多支持 6 个月；"
     "更长周期容易触发 OOM，建议在 8GB 以上内存环境或本机运行。"
 )
+S150_LIVE_ROOT = Path("/home/dennis/re_3/codex/prediction/Models/limit-up")
+S150_STATE_FILE = S150_LIVE_ROOT / "state" / "s150_live_state.json"
+S150_RUN_ROOT = S150_LIVE_ROOT / "runs" / "s150_live"
 
 
 def _get_engine(request: Request):
@@ -61,6 +68,133 @@ def _guard_server_backtest_range(start: date, end: date):
         raise HTTPException(status_code=400, detail=BACKTEST_SERVER_GUARD_MESSAGE)
 
 
+def _s150_date(value: Any) -> str:
+    raw = str(value or "").strip().replace("-", "").replace("/", "")
+    if raw.endswith(".0"):
+        raw = raw[:-2]
+    return re.sub(r"\D", "", raw)[:8]
+
+
+def _s150_stock(value: Any) -> str:
+    raw = str(value or "").strip()
+    if raw.endswith(".0"):
+        raw = raw[:-2]
+    digits = re.sub(r"\D", "", raw)
+    return digits.zfill(6)[-6:] if digits else ""
+
+
+def _finite_float(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except Exception:
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _load_s150_state() -> dict[str, Any]:
+    if not S150_STATE_FILE.exists():
+        return {}
+    try:
+        return json.loads(S150_STATE_FILE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"S150 state read failed: {exc}") from exc
+
+
+def _latest_s150_manifest() -> dict[str, Any] | None:
+    if not S150_RUN_ROOT.exists():
+        return None
+    manifests: list[tuple[str, float, Path, dict[str, Any]]] = []
+    for path in S150_RUN_ROOT.glob("*_asof*/manifest.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if str(payload.get("model_name", "") or "") != "s150_sr004_live_v1":
+            continue
+        trade_date = _s150_date(payload.get("trade_date", ""))
+        if not trade_date:
+            continue
+        manifests.append((trade_date, path.stat().st_mtime, path, payload))
+    if not manifests:
+        return None
+    manifests.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    payload = dict(manifests[0][3])
+    payload["_manifest_path"] = str(manifests[0][2])
+    return payload
+
+
+def _s150_name_map(request: Request, symbols: list[str]) -> dict[str, str]:
+    repo = getattr(request.app.state, "repo", None)
+    if repo is None or not symbols:
+        return {}
+    out: dict[str, str] = {}
+    try:
+        import polars as pl
+
+        df = repo.get_instruments()
+        if not df.is_empty() and "name" in df.columns:
+            wanted = set(symbols)
+            code_expr = (
+                pl.col("code").cast(pl.Utf8)
+                if "code" in df.columns
+                else pl.col("symbol").cast(pl.Utf8).str.extract(r"(\d+)", 1)
+            )
+            hits = (
+                df.with_columns(code_expr.str.zfill(6).alias("_s150_code"))
+                .filter(pl.col("_s150_code").is_in(wanted))
+                .select(["_s150_code", "name"])
+                .to_dicts()
+            )
+            for row in hits:
+                out.setdefault(str(row.get("_s150_code", "")), str(row.get("name", "") or ""))
+    except Exception:
+        pass
+    missing = [symbol for symbol in symbols if symbol not in out]
+    if missing:
+        try:
+            out.update(repo.get_name_map(missing))
+        except Exception:
+            pass
+    return out
+
+
+def _s150_trade_rows(state: dict[str, Any], name_map: dict[str, str], limit: int = 20) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    cumulative = 0.0
+    active = [
+        rec
+        for rec in state.get("s146_history", [])
+        if int(rec.get("n_positions", 0) or 0) > 0 and _s150_stock(rec.get("selected_stock_code", ""))
+    ]
+    active = sorted(active, key=lambda rec: _s150_date(rec.get("trade_date", "")))
+    for rec in active:
+        day_ret = _finite_float(rec.get("day_ret"))
+        if day_ret is not None:
+            cumulative = (1.0 + cumulative) * (1.0 + day_ret) - 1.0
+        code = _s150_stock(rec.get("selected_stock_code", ""))
+        rows.append(
+            {
+                "index": len(rows) + 1,
+                "date": _s150_date(rec.get("trade_date", "")),
+                "stock_code": code,
+                "stock_name": name_map.get(code, ""),
+                "buy_price": _finite_float(rec.get("buy_price")),
+                "sell_price": _finite_float(rec.get("sell_price")),
+                "day_return": day_ret,
+                "cumulative_return": cumulative if day_ret is not None else None,
+                "settlement_status": str(rec.get("settlement_status", "")),
+                "exit_date": _s150_date(rec.get("exit_date", "")),
+                "exit_time_hhmm": int(rec.get("exit_time_hhmm")) if rec.get("exit_time_hhmm") is not None else None,
+                "exit_reason": str(rec.get("exit_reason", "")),
+            }
+        )
+    tail = rows[-limit:]
+    start_index = max(0, len(rows) - len(tail))
+    for offset, row in enumerate(tail, start=1):
+        row["index"] = start_index + offset
+    return tail
+
+
 # ================================================================
 # 状态
 # ================================================================
@@ -69,6 +203,68 @@ def _guard_server_backtest_range(start: date, end: date):
 def status():
     """前端可用此接口判断回测页是否要灰显。"""
     return {"available": True}
+
+
+@router.get("/s150-sr004")
+def s150_sr004(request: Request):
+    """S150-SR004 live recommendation and settled daily trade ledger."""
+    state = _load_s150_state()
+    latest_manifest = _latest_s150_manifest()
+
+    selected = ""
+    latest_trade_date = ""
+    latest_generated_at = ""
+    manifest_path = ""
+    buy_price: float | None = None
+    status = "missing"
+    if latest_manifest:
+        selected = _s150_stock(latest_manifest.get("selected_stock_code", ""))
+        latest_trade_date = _s150_date(latest_manifest.get("trade_date", ""))
+        latest_generated_at = str(latest_manifest.get("generated_at", "") or "")
+        manifest_path = str(latest_manifest.get("_manifest_path", "") or "")
+        buy_price = _finite_float(latest_manifest.get("buy_price"))
+        status = str(latest_manifest.get("status", "") or "")
+    elif state.get("s146_history"):
+        latest_state = sorted(state.get("s146_history", []), key=lambda rec: _s150_date(rec.get("trade_date", "")))[-1]
+        selected = _s150_stock(latest_state.get("selected_stock_code", ""))
+        latest_trade_date = _s150_date(latest_state.get("trade_date", ""))
+        buy_price = _finite_float(latest_state.get("buy_price"))
+        status = str(latest_state.get("settlement_status", "") or "state_only")
+
+    all_symbols = {
+        _s150_stock(rec.get("selected_stock_code", ""))
+        for rec in state.get("s146_history", [])
+        if _s150_stock(rec.get("selected_stock_code", ""))
+    }
+    if selected:
+        all_symbols.add(selected)
+    name_map = _s150_name_map(request, sorted(all_symbols))
+    trades = _s150_trade_rows(state, name_map, limit=20)
+    settled_returns = [row["day_return"] for row in trades if row.get("day_return") is not None]
+    avg_day_return = sum(settled_returns) / len(settled_returns) if settled_returns else None
+
+    return {
+        "available": bool(latest_trade_date or trades),
+        "message": "" if latest_trade_date or trades else "尚未找到 S150-SR004 生产结果。",
+        "trade_date": latest_trade_date,
+        "generated_at": latest_generated_at,
+        "status": status,
+        "recommendation": {
+            "stock_code": selected,
+            "stock_name": name_map.get(selected, ""),
+            "buy_price": buy_price,
+            "text": f"今日14:45推荐：{selected or '暂无'}",
+        },
+        "avg_day_return": avg_day_return,
+        "trade_count": len(trades),
+        "settled_trade_count": len(settled_returns),
+        "source": {
+            "state_file": str(S150_STATE_FILE),
+            "manifest_path": manifest_path,
+        },
+        "update_rule": "每个交易日 14:45 以后，S150-SR004 预测结果产出后自动更新。",
+        "trades": trades,
+    }
 
 
 # ================================================================
@@ -487,4 +683,3 @@ async def strategy_cancel(request: Request):
         job.cancel_event.set()
         return {"ok": True}
     return {"ok": False, "message": "任务不存在或已完成"}
-

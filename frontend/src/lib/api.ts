@@ -610,6 +610,44 @@ export interface BacktestResult {
   per_symbol_stats: { symbol: string; total_return: number }[]
 }
 
+export interface S150Sr004TradeRow {
+  index: number
+  date: string
+  stock_code: string
+  stock_name: string
+  buy_price: number | null
+  sell_price: number | null
+  day_return: number | null
+  cumulative_return: number | null
+  settlement_status: string
+  exit_date: string
+  exit_time_hhmm: number | null
+  exit_reason: string
+}
+
+export interface S150Sr004Result {
+  available: boolean
+  message?: string
+  trade_date: string
+  generated_at: string
+  status: string
+  recommendation: {
+    stock_code: string
+    stock_name: string
+    buy_price: number | null
+    text: string
+  }
+  avg_day_return: number | null
+  trade_count: number
+  settled_trade_count: number
+  source: {
+    state_file: string
+    manifest_path: string
+  }
+  update_rule: string
+  trades: S150Sr004TradeRow[]
+}
+
 // ===== Factor Backtest =====
 export interface FactorColumn {
   id: string
@@ -1349,6 +1387,8 @@ export const api = {
   },
 
   backtestStatus: () => request<{ available: boolean }>('/api/backtest/status'),
+
+  s150Sr004: () => request<S150Sr004Result>('/api/backtest/s150-sr004'),
 
   backtestRun: (payload: {
     symbols: string[]
