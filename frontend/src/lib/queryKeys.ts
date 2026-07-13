@@ -41,6 +41,7 @@ export const QK = {
 
   // Backtest
   backtestStatus:       ['backtest-status'] as const,
+  s150Sr004:            ['s150-sr004'] as const,
 
   // Data / Pipeline
   dataStatus:           ['data-status'] as const,

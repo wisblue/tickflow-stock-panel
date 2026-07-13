@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Activity, ArrowDownRight, ArrowUpRight, BarChart3, BellRing, Database, Flame, Gauge, Info, LineChart, Loader2, Play, RefreshCw, Sparkles, Target, Timer } from 'lucide-react'
 import { DatePicker } from '@/components/DatePicker'
-import { api, type MarketSnapshotRow, type OverviewDimensionRankItem, type OverviewMarket, type AlertEvent } from '@/lib/api'
+import { api, type MarketSnapshotRow, type OverviewDimensionRankItem, type OverviewMarket, type AlertEvent, type S150Sr004Result } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { fmtBigNum, fmtPct } from '@/lib/format'
 import { useDataStatus, useCapabilities, useSettings } from '@/lib/useSharedQueries'
@@ -492,6 +492,129 @@ function HotRankCard({ title, rank, configUrl, onStockClick }: {
   )
 }
 
+function fmtDate8(v?: string | null) {
+  const raw = String(v ?? '').replace(/\D/g, '')
+  return raw.length === 8 ? `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}` : '—'
+}
+
+function fmtClock(v?: string | null) {
+  if (!v) return '—'
+  const d = new Date(v)
+  if (Number.isNaN(d.getTime())) return '—'
+  return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
+}
+
+function fmtDateTime(v?: string | null) {
+  if (!v) return '—'
+  const d = new Date(v)
+  if (Number.isNaN(d.getTime())) return '—'
+  return d.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
+}
+
+function actionText(action?: string) {
+  const raw = String(action ?? '')
+  if (!raw) return '—'
+  if (raw.includes('cash')) return '空仓'
+  if (raw === 'baseline_selected') return '基准入选'
+  return raw.replaceAll('_', ' ')
+}
+
+function priceSourceText(source?: string) {
+  const raw = String(source ?? '')
+  if (!raw) return '—'
+  if (raw === 'buy_zone_high_1445') return '14:45 买区上沿'
+  if (raw === 'close_1445') return '14:45 收盘价'
+  return raw.replaceAll('_', ' ')
+}
+
+function sellRuleText(contract?: string) {
+  const raw = String(contract ?? '')
+  if (!raw) return '—'
+  if (raw.includes('SR004')) return 'SR004: 盈利后回撤触发卖出'
+  return raw
+}
+
+function TodayFirstPickCard({ data, isLoading, isError, onStockClick }: {
+  data?: S150Sr004Result
+  isLoading: boolean
+  isError: boolean
+  onStockClick?: (symbol: string, name?: string) => void
+}) {
+  const rec = data?.recommendation
+  const hasPick = !!rec?.stock_code
+  const upstream = data?.upstream
+  const updateTime = data?.data_updated_at || data?.generated_at
+  const upstreamText = upstream?.stock_code
+    ? `${upstream.stock_code}${upstream.stock_name ? ` ${upstream.stock_name}` : ''}`
+    : '—'
+
+  return (
+    <section className="rounded-card border border-border bg-surface/80 p-3">
+      <SectionTitle icon={Target} title="今日首选" hint={fmtDate8(data?.trade_date)} />
+      {isLoading ? (
+        <div className="py-6 text-center text-[11px] text-muted">读取 S150 预测中...</div>
+      ) : isError ? (
+        <div className="py-6 text-center text-[11px] text-danger">S150 预测读取失败</div>
+      ) : !data?.available ? (
+        <div className="space-y-2 py-5 text-center text-[11px] text-muted">
+          <div>暂无 14:45 预测结果</div>
+          <div className="font-mono text-[10px]">检查时间 {fmtDateTime(data?.checked_at)}</div>
+        </div>
+      ) : (
+        <div className="space-y-2.5">
+          <div className="rounded bg-elevated/45 px-2.5 py-2">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-[10px] text-muted">S150-SR004</div>
+                {hasPick ? (
+                  <button
+                    onClick={() => onStockClick?.(rec!.stock_code, rec?.stock_name)}
+                    className="mt-0.5 block max-w-full truncate text-left text-sm font-semibold text-foreground hover:text-accent"
+                    title={rec?.stock_code}
+                  >
+                    {rec?.stock_code} {rec?.stock_name || ''}
+                  </button>
+                ) : (
+                  <div className="mt-0.5 text-sm font-semibold text-muted">今日空仓</div>
+                )}
+              </div>
+              <span className={cn(
+                'shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium',
+                hasPick ? 'bg-bull/10 text-bull' : 'bg-muted/10 text-muted',
+              )}>
+                {actionText(data.final_action || data.status)}
+              </span>
+            </div>
+            {!hasPick && upstream?.stock_code && (
+              <div className="mt-1.5 truncate text-[10px] text-secondary" title={upstreamText}>
+                上游候选 {upstreamText}
+              </div>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 gap-1.5">
+            <MiniMetric label="买入价" value={fmtPrice(rec?.buy_price)} cls="text-foreground" />
+            <MiniMetric label="价格来源" value={priceSourceText(rec?.buy_price_source)} cls="text-accent" />
+            <MiniMetric label="数据更新" value={fmtDateTime(updateTime)} cls="text-foreground" />
+            <MiniMetric label="预测产出" value={fmtClock(data.generated_at)} cls="text-foreground" />
+            <MiniMetric label="耗时" value={typeof data.elapsed_sec === 'number' ? `${data.elapsed_sec.toFixed(1)}s` : '—'} cls={data.within_latency_budget === false ? 'text-warning' : 'text-foreground'} />
+          </div>
+
+          <div className="rounded border border-border/70 bg-base/35 px-2 py-1.5 text-[10px] leading-relaxed text-secondary">
+            卖出规则: <span className="text-foreground">{sellRuleText(data.sell_rule_contract)}</span>
+          </div>
+        </div>
+      )}
+    </section>
+  )
+}
+
 export function Dashboard() {
   const qc = useQueryClient()
   const [selectedDate, setSelectedDate] = useState<string | undefined>()
@@ -505,6 +628,13 @@ export function Dashboard() {
     queryFn: () => api.overviewMarket(selectedDate),
     staleTime: 5_000,
     placeholderData: (prev) => prev,
+  })
+  const s150 = useQuery({
+    queryKey: [...QK.s150Sr004, 'today'],
+    queryFn: () => api.s150Sr004('today'),
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+    refetchIntervalInBackground: true,
   })
   const data = overview.data
   const caps = useCapabilities()
@@ -768,6 +898,12 @@ export function Dashboard() {
         </main>
 
         <aside className="min-w-0 space-y-3">
+          <TodayFirstPickCard
+            data={s150.data}
+            isLoading={s150.isLoading}
+            isError={s150.isError}
+            onStockClick={(symbol, name) => setPreviewStock({symbol, name})}
+          />
           <section className="rounded-card border border-border bg-surface/80 p-3">
             <SectionTitle icon={Flame} title="涨停梯队" hint={<span className="inline-flex items-center gap-1">{`涨停 ${data.limit.limit_up}`}{isSealedDegrade && <span className="text-[9px] px-1 rounded bg-yellow-500/10 text-yellow-600 dark:text-yellow-500">{hasDepth ? '未修正' : '降级'}</span>}</span>} />
             <LadderMini limit={data.limit} />

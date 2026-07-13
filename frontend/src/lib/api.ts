@@ -630,12 +630,24 @@ export interface S150Sr004Result {
   message?: string
   trade_date: string
   generated_at: string
+  data_updated_at?: string
+  checked_at?: string
   status: string
+  final_action?: string
+  sell_rule_contract?: string
+  elapsed_sec?: number | null
+  within_latency_budget?: boolean
   recommendation: {
     stock_code: string
     stock_name: string
     buy_price: number | null
+    buy_price_source?: string
     text: string
+  }
+  upstream?: {
+    stock_code: string
+    stock_name: string
+    action: string
   }
   avg_day_return: number | null
   trade_count: number
@@ -1388,7 +1400,12 @@ export const api = {
 
   backtestStatus: () => request<{ available: boolean }>('/api/backtest/status'),
 
-  s150Sr004: () => request<S150Sr004Result>('/api/backtest/s150-sr004'),
+  s150Sr004: (tradeDate?: string) => {
+    const params = new URLSearchParams()
+    if (tradeDate) params.set('trade_date', tradeDate)
+    const qs = params.toString()
+    return request<S150Sr004Result>(`/api/backtest/s150-sr004${qs ? `?${qs}` : ''}`)
+  },
 
   backtestRun: (payload: {
     symbols: string[]

@@ -8,10 +8,11 @@ import queue
 import re
 import threading
 from dataclasses import asdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -120,6 +121,40 @@ def _latest_s150_manifest() -> dict[str, Any] | None:
     manifests.sort(key=lambda item: (item[0], item[1]), reverse=True)
     payload = dict(manifests[0][3])
     payload["_manifest_path"] = str(manifests[0][2])
+    payload["_manifest_mtime"] = datetime.fromtimestamp(
+        manifests[0][2].stat().st_mtime,
+        tz=ZoneInfo("Asia/Shanghai"),
+    ).isoformat()
+    return payload
+
+
+def _resolve_s150_request_date(value: str | None) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    if text in {"today", "current"}:
+        return datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
+    return _s150_date(text)
+
+
+def _s150_manifest_for_date(trade_date: str) -> dict[str, Any] | None:
+    if not trade_date:
+        return None
+    path = S150_RUN_ROOT / f"{trade_date}_asof1445" / "manifest.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"S150 manifest read failed: {exc}") from exc
+    if str(payload.get("model_name", "") or "") != "s150_sr004_live_v1":
+        return None
+    payload = dict(payload)
+    payload["_manifest_path"] = str(path)
+    payload["_manifest_mtime"] = datetime.fromtimestamp(
+        path.stat().st_mtime,
+        tz=ZoneInfo("Asia/Shanghai"),
+    ).isoformat()
     return payload
 
 
@@ -205,15 +240,54 @@ def status():
     return {"available": True}
 
 
+def _empty_s150_response(trade_date: str, message: str) -> dict[str, Any]:
+    checked_at = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
+    return {
+        "available": False,
+        "message": message,
+        "trade_date": trade_date,
+        "generated_at": "",
+        "data_updated_at": "",
+        "checked_at": checked_at,
+        "status": "missing",
+        "final_action": "",
+        "sell_rule_contract": "SR004_profit_trailing_latest1430",
+        "elapsed_sec": None,
+        "within_latency_budget": False,
+        "recommendation": {
+            "stock_code": "",
+            "stock_name": "",
+            "buy_price": None,
+            "buy_price_source": "",
+            "text": "今日14:45推荐：暂无",
+        },
+        "upstream": {"stock_code": "", "stock_name": "", "action": ""},
+        "avg_day_return": None,
+        "trade_count": 0,
+        "settled_trade_count": 0,
+        "source": {"state_file": str(S150_STATE_FILE), "manifest_path": ""},
+        "update_rule": "每个交易日 14:46 以后读取 S150-SR004 预测结果。",
+        "trades": [],
+    }
+
+
 @router.get("/s150-sr004")
-def s150_sr004(request: Request):
+def s150_sr004(request: Request, trade_date: str | None = None):
     """S150-SR004 live recommendation and settled daily trade ledger."""
+    checked_at = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
+    requested_trade_date = _resolve_s150_request_date(trade_date)
     state = _load_s150_state()
-    latest_manifest = _latest_s150_manifest()
+    latest_manifest = _s150_manifest_for_date(requested_trade_date) if requested_trade_date else _latest_s150_manifest()
+    if requested_trade_date and latest_manifest is None:
+        return _empty_s150_response(
+            requested_trade_date,
+            f"尚未找到 {requested_trade_date} 14:45 S150-SR004 生产结果。",
+        )
 
     selected = ""
     latest_trade_date = ""
     latest_generated_at = ""
+    latest_data_updated_at = ""
     manifest_path = ""
     buy_price: float | None = None
     status = "missing"
@@ -221,6 +295,7 @@ def s150_sr004(request: Request):
         selected = _s150_stock(latest_manifest.get("selected_stock_code", ""))
         latest_trade_date = _s150_date(latest_manifest.get("trade_date", ""))
         latest_generated_at = str(latest_manifest.get("generated_at", "") or "")
+        latest_data_updated_at = str(latest_manifest.get("_manifest_mtime", "") or latest_generated_at)
         manifest_path = str(latest_manifest.get("_manifest_path", "") or "")
         buy_price = _finite_float(latest_manifest.get("buy_price"))
         status = str(latest_manifest.get("status", "") or "")
@@ -238,6 +313,9 @@ def s150_sr004(request: Request):
     }
     if selected:
         all_symbols.add(selected)
+    upstream_selected = _s150_stock((latest_manifest.get("s122_decision") or {}).get("selected_stock_code", "")) if latest_manifest else ""
+    if upstream_selected:
+        all_symbols.add(upstream_selected)
     name_map = _s150_name_map(request, sorted(all_symbols))
     trades = _s150_trade_rows(state, name_map, limit=20)
     settled_returns = [row["day_return"] for row in trades if row.get("day_return") is not None]
@@ -248,12 +326,24 @@ def s150_sr004(request: Request):
         "message": "" if latest_trade_date or trades else "尚未找到 S150-SR004 生产结果。",
         "trade_date": latest_trade_date,
         "generated_at": latest_generated_at,
+        "data_updated_at": latest_data_updated_at,
+        "checked_at": checked_at,
         "status": status,
+        "final_action": str(latest_manifest.get("final_action", "") or "") if latest_manifest else "",
+        "sell_rule_contract": str(latest_manifest.get("sell_rule_contract", "") or "SR004_profit_trailing_latest1430") if latest_manifest else "SR004_profit_trailing_latest1430",
+        "elapsed_sec": _finite_float(latest_manifest.get("elapsed_sec")) if latest_manifest else None,
+        "within_latency_budget": bool(latest_manifest.get("within_latency_budget", False)) if latest_manifest else False,
         "recommendation": {
             "stock_code": selected,
             "stock_name": name_map.get(selected, ""),
             "buy_price": buy_price,
+            "buy_price_source": str(latest_manifest.get("buy_price_source", "") or "") if latest_manifest else "",
             "text": f"今日14:45推荐：{selected or '暂无'}",
+        },
+        "upstream": {
+            "stock_code": upstream_selected,
+            "stock_name": name_map.get(upstream_selected, ""),
+            "action": str((latest_manifest.get("s122_decision") or {}).get("action", "") or "") if latest_manifest else "",
         },
         "avg_day_return": avg_day_return,
         "trade_count": len(trades),
@@ -262,7 +352,7 @@ def s150_sr004(request: Request):
             "state_file": str(S150_STATE_FILE),
             "manifest_path": manifest_path,
         },
-        "update_rule": "每个交易日 14:45 以后，S150-SR004 预测结果产出后自动更新。",
+        "update_rule": "每个交易日 14:46 以后读取 S150-SR004 预测结果。",
         "trades": trades,
     }
 
