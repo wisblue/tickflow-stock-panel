@@ -19,12 +19,42 @@ import {
   type PositionStock,
 } from '@/lib/positions'
 
+const INTRADAY_INDICATOR_KEYS = ['macd', 'rsi', 'kdj', 'boll', 'moneyflow'] as const
+const INTRADAY_INDICATOR_LABELS: Record<IntradayIndicator, string> = {
+  macd: 'MACD',
+  rsi: 'RSI',
+  kdj: 'KDJ',
+  boll: 'BOLL',
+  moneyflow: '资金',
+}
+const POSITIONS_INTRADAY_INDICATORS_KEY = 'positions-intraday-indicators'
+
+function loadIntradayIndicators(): IntradayIndicator[] {
+  try {
+    const raw = localStorage.getItem(POSITIONS_INTRADAY_INDICATORS_KEY)
+    const rows = raw ? JSON.parse(raw) : []
+    if (!Array.isArray(rows)) return []
+    const allowed = new Set<IntradayIndicator>(INTRADAY_INDICATOR_KEYS as unknown as IntradayIndicator[])
+    return rows.filter((row): row is IntradayIndicator => allowed.has(row))
+  } catch {
+    return []
+  }
+}
+
+function saveIntradayIndicators(rows: IntradayIndicator[]) {
+  try {
+    localStorage.setItem(POSITIONS_INTRADAY_INDICATORS_KEY, JSON.stringify(rows))
+  } catch {
+    // ignore storage failures
+  }
+}
+
 export function Positions() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [positions, setPositions] = useState<PositionStock[]>(() => loadPositions())
   const [activeSymbol, setActiveSymbol] = useState(() => getActivePositionSymbol())
   const [chartInfo, setChartInfo] = useState<StockDailyKChartResult | null>(null)
-  const [intradayIndicators, setIntradayIndicators] = useState<IntradayIndicator[]>([])
+  const [intradayIndicators, setIntradayIndicators] = useState<IntradayIndicator[]>(() => loadIntradayIndicators())
 
   const refreshLocal = useCallback(() => {
     const nextRows = loadPositions()
@@ -102,8 +132,30 @@ export function Positions() {
     staleTime: 0,
     refetchInterval: moneyFlowEnabled ? 5_000 : false,
   })
+  const sr004Q = useQuery({
+    queryKey: QK.sr004RealtimeExit(activeSymbol, latestDate ?? undefined),
+    queryFn: () => api.sr004RealtimeExit(activeSymbol, latestDate ?? undefined),
+    enabled: !!activeSymbol && !!latestDate,
+    staleTime: 0,
+    retry: false,
+    refetchInterval: 60_000,
+  })
+  const sr004SellPrice = sr004Q.data?.sell_price
+  const sr004SellPriceLine = useMemo(() => {
+    if (typeof sr004SellPrice !== 'number' || !Number.isFinite(sr004SellPrice) || sr004SellPrice <= 0) return undefined
+    if (!String(sr004Q.data?.status || '').startsWith('sell_triggered')) return undefined
+    const pending = sr004Q.data?.status === 'sell_triggered_fill_pending'
+    return {
+      price: sr004SellPrice,
+      label: `${pending ? 'SR004待成交' : 'SR004卖出'} ${sr004SellPrice.toFixed(2)}`,
+    }
+  }, [sr004Q.data?.status, sr004SellPrice])
   const toggleIntradayIndicator = useCallback((key: IntradayIndicator) => {
-    setIntradayIndicators(prev => prev.includes(key) ? prev.filter(item => item !== key) : [...prev, key])
+    setIntradayIndicators(prev => {
+      const next = prev.includes(key) ? prev.filter(item => item !== key) : [...prev, key]
+      saveIntradayIndicators(next)
+      return next
+    })
   }, [])
 
   return (
@@ -160,15 +212,8 @@ export function Positions() {
               <div className="border-b border-border/40 px-4 py-3 text-sm font-medium text-foreground">分时线</div>
               <div className="p-3">
                 <div className="flex items-center gap-1.5 px-1 pb-0.5">
-                  {(['macd', 'rsi', 'kdj', 'boll', 'moneyflow'] as const).map(key => {
+                  {INTRADAY_INDICATOR_KEYS.map(key => {
                     const active = intradayIndicators.includes(key)
-                    const labelMap: Record<IntradayIndicator, string> = {
-                      macd: 'MACD',
-                      rsi: 'RSI',
-                      kdj: 'KDJ',
-                      boll: 'BOLL',
-                      moneyflow: '资金',
-                    }
                     return (
                       <button
                         key={key}
@@ -179,11 +224,11 @@ export function Positions() {
                             : 'bg-elevated text-muted hover:text-secondary'
                         }`}
                       >
-                        {labelMap[key]}
+                        {INTRADAY_INDICATOR_LABELS[key]}
                       </button>
                     )
                   })}
-                  {transactionQ.isFetching && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted" />}
+                  {(transactionQ.isFetching || sr004Q.isFetching) && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted" />}
                 </div>
                 <StockIntradayChart
                   symbol={activeSymbol}
@@ -192,6 +237,8 @@ export function Positions() {
                   height={720}
                   indicators={intradayIndicators}
                   moneyFlowRows={transactionQ.data?.rows}
+                  refetchInterval={60_000}
+                  sellPriceLine={sr004SellPriceLine}
                 />
               </div>
             </section>

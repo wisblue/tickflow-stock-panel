@@ -42,6 +42,7 @@ export const QK = {
   // Backtest
   backtestStatus:       ['backtest-status'] as const,
   s150Sr004:            ['s150-sr004'] as const,
+  sr004RealtimeExit:    (symbol: string, tradeDate?: string) => ['sr004-realtime-exit', symbol, tradeDate ?? 'latest'] as const,
 
   // Data / Pipeline
   dataStatus:           ['data-status'] as const,

@@ -15,6 +15,8 @@ interface Props {
   onPriceHover?: (price: number | null) => void
   indicators?: IntradayIndicator[]
   moneyFlowRows?: TransactionIntradayRow[]
+  refetchInterval?: number | false
+  sellPriceLine?: { price: number; label?: string }
 }
 
 export function StockIntradayChart({
@@ -26,6 +28,8 @@ export function StockIntradayChart({
   onPriceHover,
   indicators,
   moneyFlowRows,
+  refetchInterval = false,
+  sellPriceLine,
 }: Props) {
   const qc = useQueryClient()
   const [minuteDismissed, setMinuteDismissed] = useState(false)
@@ -34,6 +38,8 @@ export function StockIntradayChart({
     queryKey: QK.klineMinute(symbol, date ?? ''),
     queryFn: () => api.klineMinute(symbol, date ?? undefined),
     enabled: !!symbol && !!date,
+    staleTime: 0,
+    refetchInterval,
   })
 
   const fetchMinute = useMutation({
@@ -120,6 +126,7 @@ export function StockIntradayChart({
           onPriceHover={onPriceHover}
           indicators={indicators}
           moneyFlowRows={moneyFlowRows}
+          sellPriceLine={sellPriceLine}
         />
       )}
     </div>

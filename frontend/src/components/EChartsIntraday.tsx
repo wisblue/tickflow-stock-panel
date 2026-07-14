@@ -27,6 +27,7 @@ interface Props {
   showAvgLine?: boolean
   indicators?: IntradayIndicator[]
   moneyFlowRows?: TransactionIntradayRow[]
+  sellPriceLine?: { price: number; label?: string }
 }
 
 function fmtTime(dt: string): string {
@@ -251,6 +252,7 @@ function buildOption(
   showAvgLine = true,
   indicators: IntradayIndicator[] = [],
   moneyFlowRows?: TransactionIntradayRow[],
+  sellPriceLine?: { price: number; label?: string },
 ): EChartsOption {
   // 将数据映射到全天时间轴上的正确位置
   const timeIndexMap = new Map(FULL_DAY_TIMES.map((t, i) => [t, i]))
@@ -329,6 +331,10 @@ function buildOption(
         if (diff > maxDiff) maxDiff = diff
       }
     }
+    if (isValidPrice(sellPriceLine?.price)) {
+      const diff = Math.abs(sellPriceLine.price - prevClose)
+      if (diff > maxDiff) maxDiff = diff
+    }
 
     if (showLimitLines && yMode === 'limit') {
       const { limitUp, limitDown } = getLimitPrices(prevClose, symbol)
@@ -370,6 +376,22 @@ function buildOption(
       yMin = prevClose - maxDiff
       yMax = prevClose + maxDiff
     }
+  }
+  if (isValidPrice(sellPriceLine?.price)) {
+    markLineData.push({
+      yAxis: sellPriceLine.price,
+      lineStyle: { color: '#EF4444', type: 'solid', width: 3 },
+      label: {
+        show: true,
+        formatter: sellPriceLine.label || `SR004 ${sellPriceLine.price.toFixed(2)}`,
+        position: 'insideEndTop',
+        color: '#EF4444',
+        fontSize: 11,
+        fontWeight: 700,
+        fontFamily: 'JetBrains Mono, monospace',
+      },
+      symbol: 'none',
+    })
   }
   const percentAxisShown = isValidPrice(prevClose) && yMin != null && yMax != null
   const moneyFlowAxisIndex = subIndicators.length + 2 + (percentAxisShown ? 1 : 0)
@@ -766,6 +788,7 @@ export function EChartsIntraday({
   showAvgLine = true,
   indicators = [],
   moneyFlowRows,
+  sellPriceLine,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<ECharts | null>(null)
@@ -855,11 +878,11 @@ export function EChartsIntraday({
       }
       fullDayToDataIdx.current = mapping
 
-      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, symbol, showLimitLines, showAvgLine, indicators, moneyFlowRows), true)
+      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, symbol, showLimitLines, showAvgLine, indicators, moneyFlowRows, sellPriceLine), true)
     } else {
       chart.clear()
     }
-  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, symbol, showLimitLines, showAvgLine, indicators, moneyFlowRows])
+  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, symbol, showLimitLines, showAvgLine, indicators, moneyFlowRows, sellPriceLine])
 
   useEffect(() => {
     return () => {

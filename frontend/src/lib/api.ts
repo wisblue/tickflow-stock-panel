@@ -660,6 +660,29 @@ export interface S150Sr004Result {
   trades: S150Sr004TradeRow[]
 }
 
+export interface Sr004RealtimeExitResult {
+  status: string
+  stock_code: string
+  trade_date: string
+  entry_date?: string
+  buy_price?: number | null
+  buy_price_source?: string
+  checked_at?: string
+  transaction_persisted?: boolean
+  redis_data_max_time_hhmm?: number | null
+  latest_time_hhmmss?: number | null
+  latest_price?: number | null
+  latest_gross_ret?: number | null
+  observed_mfe?: number | null
+  giveback_from_mfe?: number | null
+  exit_time_hhmmss?: number | null
+  sell_price?: number | null
+  exit_reason?: string
+  stock_gross_ret?: number | null
+  stock_net_ret?: number | null
+  [key: string]: any
+}
+
 // ===== Factor Backtest =====
 export interface FactorColumn {
   id: string
@@ -1405,6 +1428,12 @@ export const api = {
     if (tradeDate) params.set('trade_date', tradeDate)
     const qs = params.toString()
     return request<S150Sr004Result>(`/api/backtest/s150-sr004${qs ? `?${qs}` : ''}`)
+  },
+
+  sr004RealtimeExit: (symbol: string, tradeDate?: string) => {
+    const params = new URLSearchParams({ symbol })
+    if (tradeDate) params.set('trade_date', tradeDate)
+    return request<Sr004RealtimeExitResult>(`/api/backtest/sr004-realtime-exit?${params.toString()}`)
   },
 
   backtestRun: (payload: {

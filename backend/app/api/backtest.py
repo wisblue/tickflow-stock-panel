@@ -6,6 +6,7 @@ import json
 import math
 import queue
 import re
+import subprocess
 import threading
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
@@ -39,6 +40,9 @@ BACKTEST_SERVER_GUARD_MESSAGE = (
 S150_LIVE_ROOT = Path("/home/dennis/re_3/codex/prediction/Models/limit-up")
 S150_STATE_FILE = S150_LIVE_ROOT / "state" / "s150_live_state.json"
 S150_RUN_ROOT = S150_LIVE_ROOT / "runs" / "s150_live"
+SR004_EVAL_SCRIPT = S150_LIVE_ROOT / "scripts" / "evaluate_sr004_realtime_exit.py"
+SR004_WORKDIR = Path("/home/dennis/re_3/codex/prediction")
+SR004_PYTHON = Path("/home/dennis/anaconda3/envs/re_3/bin/python")
 
 
 def _get_engine(request: Request):
@@ -355,6 +359,60 @@ def s150_sr004(request: Request, trade_date: str | None = None):
         "update_rule": "每个交易日 14:46 以后读取 S150-SR004 预测结果。",
         "trades": trades,
     }
+
+
+@router.get("/sr004-realtime-exit")
+def sr004_realtime_exit(symbol: str, trade_date: str | None = None):
+    """Evaluate one stock's SR004 realtime exit directly from Redis."""
+    checked_at = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
+    stock_code = _s150_stock(symbol)
+    if not stock_code:
+        raise HTTPException(status_code=400, detail="symbol must contain a 6-digit stock code")
+    resolved_trade_date = _resolve_s150_request_date(trade_date) or datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
+    if not SR004_EVAL_SCRIPT.exists():
+        raise HTTPException(status_code=500, detail=f"SR004 evaluator not found: {SR004_EVAL_SCRIPT}")
+    cmd = [
+        str(SR004_PYTHON),
+        str(SR004_EVAL_SCRIPT),
+        "--trade-date",
+        resolved_trade_date,
+        "--stock-code",
+        stock_code,
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(SR004_WORKDIR),
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail=f"SR004 evaluator timed out for {stock_code}") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"SR004 evaluator failed to start: {exc}") from exc
+
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        return {
+            "status": "blocked_sr004_evaluator_failed",
+            "stock_code": stock_code,
+            "trade_date": resolved_trade_date,
+            "checked_at": checked_at,
+            "message": detail or f"SR004 evaluator failed with code {proc.returncode}",
+            "transaction_persisted": False,
+        }
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail=f"SR004 evaluator returned invalid JSON: {proc.stdout[:500]}") from exc
+    if isinstance(payload, dict):
+        payload.setdefault("checked_at", checked_at)
+        payload.setdefault("trade_date", resolved_trade_date)
+        payload.setdefault("stock_code", stock_code)
+        return payload
+    raise HTTPException(status_code=500, detail="SR004 evaluator returned non-object JSON")
 
 
 # ================================================================
