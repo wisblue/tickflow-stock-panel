@@ -222,7 +222,7 @@ export function Data() {
   const quoteInterval = useQuoteInterval()
   const updateInterval = useUpdateQuoteInterval()
 
-  const realtimeEnabled = prefs.data?.realtime_quotes_enabled ?? false
+  const realtimeEnabled = prefs.data?.realtime_quotes_enabled ?? true
   const quoteStatus = useQuoteStatus()
   const toggleQuote = useToggleRealtimeQuotes()
 

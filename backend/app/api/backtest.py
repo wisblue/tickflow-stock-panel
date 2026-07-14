@@ -8,6 +8,7 @@ import queue
 import re
 import subprocess
 import threading
+import time
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -43,6 +44,16 @@ S150_RUN_ROOT = S150_LIVE_ROOT / "runs" / "s150_live"
 SR004_EVAL_SCRIPT = S150_LIVE_ROOT / "scripts" / "evaluate_sr004_realtime_exit.py"
 SR004_WORKDIR = Path("/home/dennis/re_3/codex/prediction")
 SR004_PYTHON = Path("/home/dennis/anaconda3/envs/re_3/bin/python")
+S150_PRIORITY_SCRIPT = S150_LIVE_ROOT / "scripts" / "run_s150_as_priority_1445.sh"
+S150_SR004_SCRIPT = S150_LIVE_ROOT / "scripts" / "run_s150_sr004_live.py"
+S150_RUNBOOK = S150_LIVE_ROOT / "reports" / "s150_live_runbook.md"
+S150_PRIORITY_LOG_DIR = S150_LIVE_ROOT / "logs" / "s150_as_priority"
+GO_FETCHER_ROOT = Path("/home/dennis/re_3/github/go-fetcher")
+GO_FETCHER_LOG_DIR = GO_FETCHER_ROOT / "logs"
+GO_FETCHER_ACTIVE_SYMBOLS = Path("/home/dennis/re_3/github/tickflow-stock-panel/data/user_data/active_symbols.txt")
+TDX_REDIS_ADDR = "192.168.50.68:6379"
+TDX_REDIS_DB = 15
+TDX_REDIS_PREFIX = "tdx:trans"
 
 
 def _get_engine(request: Request):
@@ -275,18 +286,358 @@ def _empty_s150_response(trade_date: str, message: str) -> dict[str, Any]:
     }
 
 
+def _status_item(
+    key: str,
+    label: str,
+    status: str,
+    message: str,
+    detail: dict[str, Any] | None = None,
+    fixable: bool = False,
+) -> dict[str, Any]:
+    return {
+        "key": key,
+        "label": label,
+        "status": status,
+        "message": message,
+        "detail": detail or {},
+        "fixable": bool(fixable),
+    }
+
+
+def _overall_status(items: list[dict[str, Any]]) -> str:
+    statuses = {str(item.get("status", "")) for item in items}
+    if "fail" in statuses:
+        return "fail"
+    if "warn" in statuses:
+        return "warn"
+    if "pending" in statuses:
+        return "pending"
+    return "ok"
+
+
+def _tail_text(path: Path, max_bytes: int = 50000) -> str:
+    if not path.exists() or not path.is_file():
+        return ""
+    size = path.stat().st_size
+    with path.open("rb") as fh:
+        if size > max_bytes:
+            fh.seek(size - max_bytes)
+        data = fh.read()
+    return data.decode("utf-8", errors="ignore")
+
+
+def _latest_realtime_log_timestamp(trade_date: str) -> tuple[Path | None, datetime | None, str]:
+    candidates = sorted(GO_FETCHER_LOG_DIR.glob("realtime_redis_*.log"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+    today_log = GO_FETCHER_LOG_DIR / f"realtime_redis_{trade_date}.log"
+    if today_log.exists():
+        candidates.insert(0, today_log)
+    pattern = re.compile(r"(20\d{2})/(\d{2})/(\d{2})\s+(\d{2}:\d{2}:\d{2})")
+    for path in dict.fromkeys(candidates):
+        text = _tail_text(path)
+        matches = list(pattern.finditer(text))
+        if not matches:
+            continue
+        match = matches[-1]
+        dt = datetime.strptime(
+            f"{match.group(1)}{match.group(2)}{match.group(3)} {match.group(4)}",
+            "%Y%m%d %H:%M:%S",
+        ).replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+        return path, dt, text.splitlines()[-1] if text.splitlines() else ""
+    return None, None, ""
+
+
+def _process_lines() -> list[str]:
+    try:
+        proc = subprocess.run(
+            ["ps", "-eo", "pid,lstart,args"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except Exception:
+        return []
+    return [line for line in proc.stdout.splitlines() if line.strip()]
+
+
+def _fake_fetcher_processes() -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for line in _process_lines():
+        if "go-fetcher" not in line or "s150fake" not in line:
+            continue
+        parts = line.strip().split(maxsplit=1)
+        try:
+            pid = int(parts[0])
+        except Exception:
+            continue
+        out.append({"pid": pid, "cmd": line})
+    return out
+
+
+def _prod_fetcher_processes() -> list[str]:
+    return [
+        line for line in _process_lines()
+        if ("go-fetcher" in line or "run_realtime_redis.sh" in line)
+        and "--redis-key-prefix tdx:trans" in line
+        and "--redis-key-prefix tdx:trans:" not in line
+        and "--realtime" in line
+    ]
+
+
+def _crontab_text() -> str:
+    try:
+        proc = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=3, check=False)
+    except Exception:
+        return ""
+    return proc.stdout if proc.returncode == 0 else ""
+
+
+def _read_json_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _active_symbols_sample(limit: int = 10) -> list[str]:
+    if not GO_FETCHER_ACTIVE_SYMBOLS.exists():
+        return []
+    symbols: list[str] = []
+    for raw in re.split(r"[\s,]+", GO_FETCHER_ACTIVE_SYMBOLS.read_text(encoding="utf-8", errors="ignore")):
+        digits = re.sub(r"\D", "", raw)
+        if len(digits) >= 6:
+            symbols.append(digits[-6:].zfill(6))
+        if len(symbols) >= limit:
+            break
+    return symbols
+
+
+def _hhmm(dt: datetime) -> int:
+    return dt.hour * 100 + dt.minute
+
+
+def _requires_fresh_intraday_tick(now: datetime) -> bool:
+    value = _hhmm(now)
+    return 925 <= value <= 1135 or 1300 <= value <= 1535
+
+
+def _same_day_status_for_timestamp(now: datetime, trade_date: str, ts: datetime | None, fresh_age_sec = 300) -> tuple[str, str, float | None]:
+    if ts is None:
+        return "fail", "未找到时间戳", None
+    age = (now - ts).total_seconds()
+    if ts.strftime("%Y%m%d") != trade_date:
+        if _hhmm(now) < 925:
+            return "pending", "等待今日开盘数据", age
+        return "fail", "未发现今日数据", age
+    if _requires_fresh_intraday_tick(now) and age > fresh_age_sec:
+        return "warn", f"交易时段内超过 {int(fresh_age_sec / 60)} 分钟未更新", age
+    return "ok", "今日数据正常", age
+
+
+def _redis_runtime_item(now: datetime, trade_date: str) -> dict[str, Any]:
+    try:
+        import redis
+    except Exception:
+        return _status_item("redis_data", "Redis 数据", "warn", "backend 未安装 redis 模块，跳过 Redis 新鲜度检测")
+    host, _, port_text = TDX_REDIS_ADDR.partition(":")
+    try:
+        client = redis.Redis(
+            host=host or "localhost",
+            port=int(port_text or "6379"),
+            db=TDX_REDIS_DB,
+            socket_connect_timeout=0.3,
+            socket_timeout=0.8,
+            decode_responses=True,
+        )
+        client.ping()
+        sample = _active_symbols_sample()
+        checked = 0
+        hits = 0
+        latest_dt: datetime | None = None
+        for symbol in sample:
+            checked += 1
+            raw = client.get(f"{TDX_REDIS_PREFIX}:{symbol}")
+            if not raw:
+                continue
+            hits += 1
+            for line in reversed(raw.splitlines()):
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                ts = rec.get("timestamp")
+                if ts is None:
+                    continue
+                dt = datetime.fromtimestamp(float(ts), ZoneInfo("Asia/Shanghai"))
+                if latest_dt is None or dt > latest_dt:
+                    latest_dt = dt
+                break
+        if not sample:
+            return _status_item("redis_data", "Redis 数据", "warn", "active_symbols.txt 为空，无法抽样检测 Redis 数据")
+        if hits == 0:
+            return _status_item("redis_data", "Redis 数据", "fail", "active symbols 抽样没有 Redis 数据", {"checked": checked})
+        status, reason, age = _same_day_status_for_timestamp(now, trade_date, latest_dt)
+        msg = f"抽样 {checked} 只，命中 {hits} 只，最新 {latest_dt.strftime('%H:%M:%S') if latest_dt else '未知'}，{reason}"
+        return _status_item(
+            "redis_data",
+            "Redis 数据",
+            status,
+            msg,
+            {"checked": checked, "hits": hits, "latest_at": latest_dt.isoformat() if latest_dt else "", "age_sec": age},
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _status_item("redis_data", "Redis 数据", "fail", f"Redis 连接/读取失败: {exc}")
+
+
+def _build_s150_runtime_status(trade_date: str) -> dict[str, Any]:
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    out = S150_RUN_ROOT / f"{trade_date}_asof1445"
+    manifest_path = out / "manifest.json"
+    prediction_path = out / "s150_sr004_prediction.parquet"
+    goal_path = out / "s150_sr004_goal_status.json"
+    items: list[dict[str, Any]] = []
+
+    items.append(_status_item(
+        "runbook",
+        "Runbook",
+        "ok" if S150_RUNBOOK.exists() else "fail",
+        "已找到 S150/SR004 14:45 Live Runbook" if S150_RUNBOOK.exists() else f"缺少 runbook: {S150_RUNBOOK}",
+        {"path": str(S150_RUNBOOK)},
+    ))
+
+    cron = _crontab_text()
+    items.append(_status_item(
+        "cron_go_fetcher",
+        "go-fetcher cron",
+        "ok" if "run_realtime_redis.sh" in cron and "persist_realtime_redis_snapshot.sh" in cron else "fail",
+        "09:26 realtime 与 15:35 persist cron 已安装" if "run_realtime_redis.sh" in cron and "persist_realtime_redis_snapshot.sh" in cron else "缺少 go-fetcher realtime/persist cron",
+    ))
+    items.append(_status_item(
+        "cron_s150_priority",
+        "S150 priority cron",
+        "ok" if "run_s150_as_priority_1445.sh" in cron else "fail",
+        "14:20 S150 A/S priority cron 已安装" if "run_s150_as_priority_1445.sh" in cron else "缺少 S150 A/S priority cron",
+    ))
+    items.append(_status_item(
+        "s150_log_dir",
+        "S150 日志目录",
+        "ok" if S150_PRIORITY_LOG_DIR.exists() else "fail",
+        f"日志目录存在: {S150_PRIORITY_LOG_DIR}" if S150_PRIORITY_LOG_DIR.exists() else f"日志目录缺失: {S150_PRIORITY_LOG_DIR}",
+        {"path": str(S150_PRIORITY_LOG_DIR)},
+        fixable=not S150_PRIORITY_LOG_DIR.exists(),
+    ))
+
+    ps_lines = _process_lines()
+    prod_fetcher = _prod_fetcher_processes()
+    fake_fetcher = [proc["cmd"] for proc in _fake_fetcher_processes()]
+    items.append(_status_item(
+        "go_fetcher_process",
+        "go-fetcher 生产进程",
+        "ok" if prod_fetcher else "fail",
+        f"生产 realtime fetcher 正在运行，进程数 {len(prod_fetcher)}" if prod_fetcher else "未发现生产 go-fetcher realtime 进程",
+        {"process_count": len(prod_fetcher)},
+        fixable=not prod_fetcher,
+    ))
+    if fake_fetcher:
+        items.append(_status_item(
+            "fake_replay_process",
+            "fake replay 进程",
+            "warn",
+            f"发现 fake replay go-fetcher 进程 {len(fake_fetcher)} 个，检测时已排除",
+            {"process_count": len(fake_fetcher)},
+            fixable=True,
+        ))
+    else:
+        items.append(_status_item("fake_replay_process", "fake replay 进程", "ok", "未发现 fake replay go-fetcher 进程"))
+
+    log_path, log_dt, log_tail = _latest_realtime_log_timestamp(trade_date)
+    if log_dt is None:
+        items.append(_status_item("go_fetcher_log", "实时日志", "fail", "未找到 go-fetcher realtime 日志时间戳"))
+    else:
+        log_status, reason, age = _same_day_status_for_timestamp(now, trade_date, log_dt)
+        msg = f"最新日志 {log_dt.strftime('%H:%M:%S')} ({log_path.name if log_path else 'unknown'})，{reason}"
+        items.append(_status_item(
+            "go_fetcher_log",
+            "实时日志",
+            log_status,
+            msg,
+            {"path": str(log_path) if log_path else "", "latest_at": log_dt.isoformat(), "age_sec": age, "tail": log_tail},
+        ))
+
+    items.append(_redis_runtime_item(now, trade_date))
+
+    s150_log = S150_PRIORITY_LOG_DIR / f"s150_as_priority_{trade_date}.log"
+    if now.hour < 14 or (now.hour == 14 and now.minute < 20):
+        s150_stage_status = "pending"
+        s150_stage_msg = "14:20 S150 priority cron 尚未到启动时间"
+    elif s150_log.exists():
+        s150_stage_status = "ok"
+        s150_stage_msg = f"已发现今日 S150 priority 日志: {s150_log.name}"
+    else:
+        s150_stage_status = "fail"
+        s150_stage_msg = f"14:20 后仍未发现今日 S150 priority 日志: {s150_log}"
+    items.append(_status_item("s150_priority_log", "S150 今日启动", s150_stage_status, s150_stage_msg, {"path": str(s150_log)}))
+
+    if manifest_path.exists() and prediction_path.exists():
+        artifact_status = "ok"
+        artifact_msg = "今日 manifest 与 prediction 已产出"
+    elif now.hour < 14 or (now.hour == 14 and now.minute < 46):
+        artifact_status = "pending"
+        artifact_msg = "14:46 前今日预测结果可未产出"
+    else:
+        artifact_status = "fail"
+        artifact_msg = "14:46 后今日 manifest/prediction 仍缺失"
+    items.append(_status_item(
+        "s150_artifacts",
+        "今日预测产物",
+        artifact_status,
+        artifact_msg,
+        {"manifest": str(manifest_path), "prediction": str(prediction_path)},
+    ))
+
+    goal = _read_json_file(goal_path)
+    if goal:
+        goal_status = "ok" if goal.get("complete") and goal.get("latency_ok") else "fail"
+        goal_msg = f"goal-status complete={goal.get('complete')} latency_ok={goal.get('latency_ok')} status={goal.get('status', '')}"
+    elif now.hour < 14 or (now.hour == 14 and now.minute < 46):
+        goal_status = "pending"
+        goal_msg = "14:46 前 goal-status 可未生成"
+    else:
+        goal_status = "fail"
+        goal_msg = "14:46 后 goal-status 缺失"
+    items.append(_status_item("s150_goal_status", "S150 goal-status", goal_status, goal_msg, {"path": str(goal_path), "payload": goal}, fixable=manifest_path.exists()))
+
+    return {
+        "trade_date": trade_date,
+        "checked_at": now.isoformat(),
+        "overall_status": _overall_status(items),
+        "items": items,
+        "fixable_count": sum(1 for item in items if item.get("fixable")),
+        "runbook_path": str(S150_RUNBOOK),
+    }
+
+
 @router.get("/s150-sr004")
 def s150_sr004(request: Request, trade_date: str | None = None):
     """S150-SR004 live recommendation and settled daily trade ledger."""
-    checked_at = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    checked_at = now.isoformat()
     requested_trade_date = _resolve_s150_request_date(trade_date)
     state = _load_s150_state()
+    fallback_from_trade_date = ""
     latest_manifest = _s150_manifest_for_date(requested_trade_date) if requested_trade_date else _latest_s150_manifest()
     if requested_trade_date and latest_manifest is None:
-        return _empty_s150_response(
-            requested_trade_date,
-            f"尚未找到 {requested_trade_date} 14:45 S150-SR004 生产结果。",
-        )
+        if requested_trade_date == now.strftime("%Y%m%d"):
+            latest_manifest = _latest_s150_manifest()
+            fallback_from_trade_date = requested_trade_date
+        if latest_manifest is None:
+            return _empty_s150_response(
+                requested_trade_date,
+                f"尚未找到 {requested_trade_date} 14:45 S150-SR004 生产结果。",
+            )
 
     selected = ""
     latest_trade_date = ""
@@ -327,7 +678,14 @@ def s150_sr004(request: Request, trade_date: str | None = None):
 
     return {
         "available": bool(latest_trade_date or trades),
-        "message": "" if latest_trade_date or trades else "尚未找到 S150-SR004 生产结果。",
+        "message": (
+            f"尚未找到 {fallback_from_trade_date} 14:45 S150-SR004 生产结果，显示最近交易日结果。"
+            if fallback_from_trade_date
+            else ("" if latest_trade_date or trades else "尚未找到 S150-SR004 生产结果。")
+        ),
+        "requested_trade_date": requested_trade_date,
+        "fallback_from_trade_date": fallback_from_trade_date,
+        "is_fallback": bool(fallback_from_trade_date),
         "trade_date": latest_trade_date,
         "generated_at": latest_generated_at,
         "data_updated_at": latest_data_updated_at,
@@ -358,6 +716,134 @@ def s150_sr004(request: Request, trade_date: str | None = None):
         },
         "update_rule": "每个交易日 14:46 以后读取 S150-SR004 预测结果。",
         "trades": trades,
+    }
+
+
+@router.get("/s150-runtime-status")
+def s150_runtime_status(trade_date: str | None = None):
+    """Runbook-oriented environment/status check for the S150/SR004 14:45 path."""
+    requested = _resolve_s150_request_date(trade_date) or datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
+    return _build_s150_runtime_status(requested)
+
+
+@router.post("/s150-runtime-fix")
+def s150_runtime_fix(trade_date: str | None = None):
+    """Apply safe one-click fixes, then return a fresh runtime status."""
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    requested = _resolve_s150_request_date(trade_date) or now.strftime("%Y%m%d")
+    fixes: list[dict[str, Any]] = []
+
+    try:
+        S150_PRIORITY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        fixes.append({"key": "s150_log_dir", "status": "ok", "message": f"ensured {S150_PRIORITY_LOG_DIR}"})
+    except Exception as exc:  # noqa: BLE001
+        fixes.append({"key": "s150_log_dir", "status": "fail", "message": str(exc)})
+
+    fake_processes = _fake_fetcher_processes()
+    fake_pids = sorted({int(proc["pid"]) for proc in fake_processes})
+    if fake_pids:
+        try:
+            subprocess.run(["kill", "-TERM", *[str(pid) for pid in fake_pids]], capture_output=True, text=True, timeout=5, check=False)
+            time.sleep(1.0)
+            remaining = sorted({int(proc["pid"]) for proc in _fake_fetcher_processes() if int(proc["pid"]) in set(fake_pids)})
+            if remaining:
+                subprocess.run(["kill", "-KILL", *[str(pid) for pid in remaining]], capture_output=True, text=True, timeout=5, check=False)
+                time.sleep(0.5)
+            final_remaining = sorted({int(proc["pid"]) for proc in _fake_fetcher_processes() if int(proc["pid"]) in set(fake_pids)})
+            fixes.append({
+                "key": "fake_replay_process",
+                "status": "ok" if not final_remaining else "warn",
+                "message": (
+                    f"stopped fake replay processes: {fake_pids}"
+                    if not final_remaining
+                    else f"attempted to stop fake replay processes, still present: {final_remaining}"
+                ),
+                "pids": fake_pids,
+                "remaining_pids": final_remaining,
+            })
+        except Exception as exc:  # noqa: BLE001
+            fixes.append({"key": "fake_replay_process", "status": "fail", "message": str(exc), "pids": fake_pids})
+    else:
+        fixes.append({"key": "fake_replay_process", "status": "skipped", "message": "no fake replay go-fetcher process found"})
+
+    if _prod_fetcher_processes():
+        fixes.append({"key": "go_fetcher_process", "status": "skipped", "message": "production realtime fetcher already running"})
+    else:
+        script = GO_FETCHER_ROOT / "scripts" / "run_realtime_redis.sh"
+        if not script.exists():
+            fixes.append({"key": "go_fetcher_process", "status": "fail", "message": f"missing start script: {script}"})
+        else:
+            try:
+                subprocess.Popen(
+                    ["bash", str(script)],
+                    cwd=str(GO_FETCHER_ROOT),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                time.sleep(3.0)
+                running = _prod_fetcher_processes()
+                fixes.append({
+                    "key": "go_fetcher_process",
+                    "status": "ok" if running else "warn",
+                    "message": (
+                        f"started production realtime fetcher, process_count={len(running)}"
+                        if running
+                        else "start command launched but production process not detected yet"
+                    ),
+                    "process_count": len(running),
+                })
+            except Exception as exc:  # noqa: BLE001
+                fixes.append({"key": "go_fetcher_process", "status": "fail", "message": str(exc)})
+
+    out = S150_RUN_ROOT / f"{requested}_asof1445"
+    manifest_path = out / "manifest.json"
+    should_refresh_goal_status = manifest_path.exists() or now.hour > 14 or (now.hour == 14 and now.minute >= 46)
+    if should_refresh_goal_status and S150_SR004_SCRIPT.exists():
+        cmd = [
+            str(SR004_PYTHON),
+            str(S150_SR004_SCRIPT),
+            "--mode",
+            "goal-status",
+            "--trade-date",
+            requested,
+            "--asof",
+            "1445",
+            "--max-latency-sec",
+            "180",
+            "--require-latency-budget",
+        ]
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=str(SR004_WORKDIR),
+                capture_output=True,
+                text=True,
+                timeout=45,
+                check=False,
+            )
+            fixes.append({
+                "key": "s150_goal_status",
+                "status": "ok" if proc.returncode == 0 else "warn",
+                "message": "refreshed goal-status" if proc.returncode == 0 else "goal-status refreshed but not passing",
+                "returncode": int(proc.returncode),
+                "stdout_tail": proc.stdout[-1000:],
+                "stderr_tail": proc.stderr[-1000:],
+            })
+        except Exception as exc:  # noqa: BLE001
+            fixes.append({"key": "s150_goal_status", "status": "fail", "message": str(exc)})
+    else:
+        fixes.append({
+            "key": "s150_goal_status",
+            "status": "skipped",
+            "message": "14:46 前且今日 manifest 不存在，跳过 goal-status 刷新",
+        })
+
+    return {
+        "trade_date": requested,
+        "fixed_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
+        "fixes": fixes,
+        "status": _build_s150_runtime_status(requested),
     }
 
 

@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Activity, ArrowDownRight, ArrowUpRight, BarChart3, BellRing, Database, Flame, Gauge, Info, LineChart, Loader2, Play, RefreshCw, Sparkles, Target, Timer } from 'lucide-react'
 import { DatePicker } from '@/components/DatePicker'
-import { api, type MarketSnapshotRow, type OverviewDimensionRankItem, type OverviewMarket, type AlertEvent, type S150Sr004Result } from '@/lib/api'
+import { api, type MarketSnapshotRow, type OverviewDimensionRankItem, type OverviewMarket, type AlertEvent, type S150RuntimeStatus, type S150Sr004Result } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { fmtBigNum, fmtPct } from '@/lib/format'
 import { useDataStatus, useCapabilities, useSettings } from '@/lib/useSharedQueries'
@@ -540,10 +540,100 @@ function sellRuleText(contract?: string) {
   return raw
 }
 
-function TodayFirstPickCard({ data, isLoading, isError, onStockClick }: {
+function runtimeTone(status?: string) {
+  if (status === 'ok') return { label: 'OK', cls: 'bg-bull/10 text-bull border-bull/25' }
+  if (status === 'warn') return { label: 'WARN', cls: 'bg-warning/10 text-warning border-warning/25' }
+  if (status === 'fail') return { label: 'FAIL', cls: 'bg-danger/10 text-danger border-danger/25' }
+  return { label: 'WAIT', cls: 'bg-muted/10 text-muted border-border' }
+}
+
+function RuntimeStatusPanel({
+  status,
+  isLoading,
+  isError,
+  isFixing,
+  isRefetching,
+  onFix,
+  onRecheck,
+}: {
+  status?: S150RuntimeStatus
+  isLoading: boolean
+  isError: boolean
+  isFixing: boolean
+  isRefetching: boolean
+  onFix: () => void
+  onRecheck: () => void
+}) {
+  const tone = runtimeTone(status?.overall_status)
+  const issueItems = status?.items?.filter(item => item.status !== 'ok') ?? []
+  const shownItems = issueItems.length > 0 ? issueItems.slice(0, 4) : (status?.items ?? []).slice(0, 3)
+  const canFix = !isLoading && !isError && !isFixing
+
+  return (
+    <div className="rounded border border-border/70 bg-base/35 px-2 py-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className="text-[10px] text-muted">运行环境</span>
+          <span className={`rounded border px-1.5 py-px font-mono text-[9px] font-semibold ${tone.cls}`}>{tone.label}</span>
+          <span className="truncate font-mono text-[9px] text-muted">{fmtDateTime(status?.checked_at)}</span>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <button
+            onClick={onFix}
+            disabled={!canFix}
+            className="inline-flex h-5 items-center gap-1 rounded bg-accent/10 px-1.5 text-[9px] text-accent hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-50"
+            title="创建缺失目录、停止 fake replay、启动默认实时行情、刷新 goal-status，然后重新检测"
+          >
+            {isFixing ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+            一键修复
+          </button>
+          <button
+            onClick={onRecheck}
+            disabled={isLoading || isRefetching}
+            className="inline-flex h-5 items-center justify-center rounded bg-elevated px-1.5 text-[9px] text-secondary hover:text-accent disabled:opacity-50"
+            title="重新检测"
+          >
+            {isRefetching ? <Loader2 className="h-3 w-3 animate-spin" /> : '检测'}
+          </button>
+        </div>
+      </div>
+
+      {isLoading ? (
+        <div className="mt-1.5 text-[10px] text-muted">检测运行环境中...</div>
+      ) : isError ? (
+        <div className="mt-1.5 text-[10px] text-danger">运行环境检测失败</div>
+      ) : (
+        <div className="mt-1.5 space-y-1">
+          {shownItems.length === 0 ? (
+            <div className="text-[10px] text-bull">全部关键项 OK</div>
+          ) : shownItems.map(item => {
+            const itemTone = runtimeTone(item.status)
+            return (
+              <div key={item.key} className="grid grid-cols-[44px_1fr] gap-1 text-[10px]">
+                <span className={`rounded border px-1 text-center font-mono text-[8px] ${itemTone.cls}`}>{itemTone.label}</span>
+                <span className="min-w-0 truncate text-secondary" title={`${item.label}: ${item.message}`}>
+                  {item.label}: {item.message}
+                </span>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function TodayFirstPickCard({ data, isLoading, isError, runtimeStatus, runtimeLoading, runtimeError, runtimeFixing, runtimeRefetching, onRuntimeFix, onRuntimeRecheck, onStockClick }: {
   data?: S150Sr004Result
   isLoading: boolean
   isError: boolean
+  runtimeStatus?: S150RuntimeStatus
+  runtimeLoading: boolean
+  runtimeError: boolean
+  runtimeFixing: boolean
+  runtimeRefetching: boolean
+  onRuntimeFix: () => void
+  onRuntimeRecheck: () => void
   onStockClick?: (symbol: string, name?: string) => void
 }) {
   const rec = data?.recommendation
@@ -557,6 +647,15 @@ function TodayFirstPickCard({ data, isLoading, isError, onStockClick }: {
   return (
     <section className="rounded-card border border-border bg-surface/80 p-3">
       <SectionTitle icon={Target} title="今日首选" hint={fmtDate8(data?.trade_date)} />
+      <RuntimeStatusPanel
+        status={runtimeStatus}
+        isLoading={runtimeLoading}
+        isError={runtimeError}
+        isFixing={runtimeFixing}
+        isRefetching={runtimeRefetching}
+        onFix={onRuntimeFix}
+        onRecheck={onRuntimeRecheck}
+      />
       {isLoading ? (
         <div className="py-6 text-center text-[11px] text-muted">读取 S150 预测中...</div>
       ) : isError ? (
@@ -568,6 +667,11 @@ function TodayFirstPickCard({ data, isLoading, isError, onStockClick }: {
         </div>
       ) : (
         <div className="space-y-2.5">
+          {data.is_fallback && (
+            <div className="rounded border border-warning/25 bg-warning/10 px-2 py-1 text-[10px] text-warning">
+              当日结果未更新，显示最近交易日 {fmtDate8(data.trade_date)} 的预测结果
+            </div>
+          )}
           <div className="rounded bg-elevated/45 px-2.5 py-2">
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
@@ -635,6 +739,20 @@ export function Dashboard() {
     staleTime: 30_000,
     refetchInterval: 60_000,
     refetchIntervalInBackground: true,
+  })
+  const s150Runtime = useQuery({
+    queryKey: QK.s150RuntimeStatus('today'),
+    queryFn: () => api.s150RuntimeStatus('today'),
+    staleTime: 15_000,
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: true,
+  })
+  const s150RuntimeFix = useMutation({
+    mutationFn: () => api.s150RuntimeFix('today'),
+    onSuccess: (result) => {
+      qc.setQueryData(QK.s150RuntimeStatus('today'), result.status)
+      qc.invalidateQueries({ queryKey: QK.s150RuntimeStatus('today') })
+    },
   })
   const data = overview.data
   const caps = useCapabilities()
@@ -902,6 +1020,13 @@ export function Dashboard() {
             data={s150.data}
             isLoading={s150.isLoading}
             isError={s150.isError}
+            runtimeStatus={s150Runtime.data}
+            runtimeLoading={s150Runtime.isLoading}
+            runtimeError={s150Runtime.isError}
+            runtimeFixing={s150RuntimeFix.isPending}
+            runtimeRefetching={s150Runtime.isRefetching}
+            onRuntimeFix={() => s150RuntimeFix.mutate()}
+            onRuntimeRecheck={() => s150Runtime.refetch()}
             onStockClick={(symbol, name) => setPreviewStock({symbol, name})}
           />
           <section className="rounded-card border border-border bg-surface/80 p-3">

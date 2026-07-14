@@ -628,6 +628,9 @@ export interface S150Sr004TradeRow {
 export interface S150Sr004Result {
   available: boolean
   message?: string
+  requested_trade_date?: string
+  fallback_from_trade_date?: string
+  is_fallback?: boolean
   trade_date: string
   generated_at: string
   data_updated_at?: string
@@ -681,6 +684,33 @@ export interface Sr004RealtimeExitResult {
   stock_gross_ret?: number | null
   stock_net_ret?: number | null
   [key: string]: any
+}
+
+export type RuntimeStatusLevel = 'ok' | 'warn' | 'fail' | 'pending'
+
+export interface S150RuntimeStatusItem {
+  key: string
+  label: string
+  status: RuntimeStatusLevel
+  message: string
+  detail?: Record<string, any>
+  fixable?: boolean
+}
+
+export interface S150RuntimeStatus {
+  trade_date: string
+  checked_at: string
+  overall_status: RuntimeStatusLevel
+  items: S150RuntimeStatusItem[]
+  fixable_count: number
+  runbook_path?: string
+}
+
+export interface S150RuntimeFixResult {
+  trade_date: string
+  fixed_at: string
+  fixes: { key: string; status: string; message: string; [key: string]: any }[]
+  status: S150RuntimeStatus
 }
 
 // ===== Factor Backtest =====
@@ -1434,6 +1464,20 @@ export const api = {
     const params = new URLSearchParams({ symbol })
     if (tradeDate) params.set('trade_date', tradeDate)
     return request<Sr004RealtimeExitResult>(`/api/backtest/sr004-realtime-exit?${params.toString()}`)
+  },
+
+  s150RuntimeStatus: (tradeDate?: string) => {
+    const params = new URLSearchParams()
+    if (tradeDate) params.set('trade_date', tradeDate)
+    const qs = params.toString()
+    return request<S150RuntimeStatus>(`/api/backtest/s150-runtime-status${qs ? `?${qs}` : ''}`)
+  },
+
+  s150RuntimeFix: (tradeDate?: string) => {
+    const params = new URLSearchParams()
+    if (tradeDate) params.set('trade_date', tradeDate)
+    const qs = params.toString()
+    return request<S150RuntimeFixResult>(`/api/backtest/s150-runtime-fix${qs ? `?${qs}` : ''}`, { method: 'POST' })
   },
 
   backtestRun: (payload: {

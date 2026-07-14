@@ -11,6 +11,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+REALTIME_QUOTES_DEFAULT_VERSION_KEY = "realtime_quotes_default_v3"
+
 
 def _path() -> Path:
     from app.config import settings
@@ -61,13 +63,14 @@ def get_realtime_quotes_enabled() -> bool:
         return False
     prefs = load()
     if "realtime_quotes_enabled" in prefs:
+        if prefs["realtime_quotes_enabled"] is False and not prefs.get(REALTIME_QUOTES_DEFAULT_VERSION_KEY):
+            save({
+                "realtime_quotes_enabled": True,
+                REALTIME_QUOTES_DEFAULT_VERSION_KEY: True,
+            })
+            return True
         return bool(prefs["realtime_quotes_enabled"])
-    try:
-        from app import secrets_store
-        return bool(secrets_store.get_tickflow_key())
-    except Exception as e:  # noqa: BLE001
-        logger.warning("resolve realtime quote default failed: %s", e)
-        return False
+    return True
 
 
 def get_indices_nav_pinned() -> bool:

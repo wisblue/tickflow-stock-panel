@@ -680,15 +680,24 @@ def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
     allowed = qs.is_realtime_allowed() if qs else True
     if req.realtime_quotes_enabled and not allowed:
         # 当前档位不允许开启实时行情 — 强制关闭
-        preferences.save({"realtime_quotes_enabled": False})
+        preferences.save({
+            "realtime_quotes_enabled": False,
+            preferences.REALTIME_QUOTES_DEFAULT_VERSION_KEY: True,
+        })
         if qs:
             qs.disable()
         return {"realtime_quotes_enabled": False, "realtime_allowed": False}
     if req.realtime_quotes_enabled and qs and qs.realtime_mode() == "watchlist" and not preferences.get_realtime_watchlist_symbols():
-        preferences.save({"realtime_quotes_enabled": False})
+        preferences.save({
+            "realtime_quotes_enabled": False,
+            preferences.REALTIME_QUOTES_DEFAULT_VERSION_KEY: True,
+        })
         return {"realtime_quotes_enabled": False, "realtime_allowed": True, "mode": "watchlist", "error": "watchlist_empty"}
 
-    preferences.save({"realtime_quotes_enabled": req.realtime_quotes_enabled})
+    preferences.save({
+        "realtime_quotes_enabled": req.realtime_quotes_enabled,
+        preferences.REALTIME_QUOTES_DEFAULT_VERSION_KEY: True,
+    })
     if qs:
         if req.realtime_quotes_enabled:
             qs.enable()

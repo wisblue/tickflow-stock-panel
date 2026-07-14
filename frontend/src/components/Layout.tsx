@@ -365,7 +365,7 @@ export function Layout() {
   const navigate = useNavigate()
   const location = useLocation()
   const version = versionData?.version
-  const realtimeEnabled = prefs?.realtime_quotes_enabled ?? false
+  const realtimeEnabled = prefs?.realtime_quotes_enabled ?? true
   // Free 档监控限制提示: 可手动关闭, 不持久化 (刷新后恢复显示)
   const [dismissFreeHint, setDismissFreeHint] = useState(false)
   const indicesPinned = prefs?.indices_nav_pinned ?? true

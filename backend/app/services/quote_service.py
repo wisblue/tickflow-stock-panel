@@ -168,11 +168,9 @@ class QuoteService:
     def stop(self) -> None:
         """停止后台行情轮询线程。"""
         self._running = False
-        self._enabled = False
         if self._thread:
             self._thread.join(timeout=10)
             self._thread = None
-        self._save_enabled(False)
         logger.info("行情服务已停止")
 
     def enable(self) -> bool:
@@ -198,6 +196,8 @@ class QuoteService:
     def disable(self) -> None:
         """关闭自动行情。"""
         self.stop()
+        self._enabled = False
+        self._save_enabled(False)
         logger.info("行情服务已关闭")
 
     def boot_check(self) -> None:
@@ -208,8 +208,7 @@ class QuoteService:
         """
         from app.services import preferences
         if not self.is_realtime_allowed():
-            if preferences.get_realtime_quotes_enabled():
-                self._save_enabled(False)
+            self._enabled = False
             logger.info("实时行情未启动:当前档位(none)无实时行情权限")
             return
         if preferences.get_realtime_quotes_enabled():
@@ -761,7 +760,10 @@ class QuoteService:
     @staticmethod
     def _save_enabled(enabled: bool) -> None:
         from app.services import preferences
-        preferences.save({"realtime_quotes_enabled": enabled})
+        preferences.save({
+            "realtime_quotes_enabled": enabled,
+            preferences.REALTIME_QUOTES_DEFAULT_VERSION_KEY: True,
+        })
 
     # ================================================================
     # 策略监控

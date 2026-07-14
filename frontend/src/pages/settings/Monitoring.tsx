@@ -50,7 +50,7 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
   const tier = tierRank(caps?.label ?? '')
   const isNoneTier = tier < 0
   const isFreeTier = tier === 0
-  const realtimeEnabled = prefs?.realtime_quotes_enabled ?? false
+  const realtimeEnabled = prefs?.realtime_quotes_enabled ?? true
   const refreshPages = prefs?.sse_refresh_pages ?? {}
   const limitLadderMonitor = prefs?.limit_ladder_monitor_enabled ?? false
   const hasDepth = !!caps?.capabilities?.['depth5.batch']
