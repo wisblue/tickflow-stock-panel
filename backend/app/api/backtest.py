@@ -11,11 +11,13 @@ import threading
 import time
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from typing import Literal
 from zoneinfo import ZoneInfo
 
+import polars as pl
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -48,6 +50,21 @@ S150_PRIORITY_SCRIPT = S150_LIVE_ROOT / "scripts" / "run_s150_as_priority_1445.s
 S150_SR004_SCRIPT = S150_LIVE_ROOT / "scripts" / "run_s150_sr004_live.py"
 S150_RUNBOOK = S150_LIVE_ROOT / "reports" / "s150_live_runbook.md"
 S150_PRIORITY_LOG_DIR = S150_LIVE_ROOT / "logs" / "s150_as_priority"
+S150_TRADE_RECORD_ROOT = S150_LIVE_ROOT / "runs" / "s150_trade_records"
+S150_BACKTEST_TRADE_REPORTS = [
+    Path("/home/dennis/re_3/codex/prediction/Models/daily_35pct/sell_rules/runs/SR004_profit_trailing_latest1430_20260704/daily_trade_report.parquet"),
+    Path("/home/dennis/re_3/codex/prediction/Models/daily_35pct/runs/s120_sa_top5_replacement_sr004_20260704/s120_candidate_sr004_trade_report.parquet"),
+]
+S150_TX_ROOT = Path("/home/dennis/historical_transaction")
+S150_ENTRY_FEE = 0.002
+S150_SR004_TRIGGER_CONDITION = (
+    "10:00后最高浮盈>=3%，且从最高浮盈回撤>=2个百分点；"
+    "触发后下一笔成交卖出，未触发则14:30强制卖出"
+)
+S150_TRADE_RECORD_UPDATE_RULE = (
+    "每个交易日 14:46 后读取 S150-SR004 预测结果；"
+    "15:06 保存当日交易记录，回测面板 15:10 后读取保存结果。"
+)
 GO_FETCHER_ROOT = Path("/home/dennis/re_3/github/go-fetcher")
 GO_FETCHER_LOG_DIR = GO_FETCHER_ROOT / "logs"
 GO_FETCHER_ACTIVE_SYMBOLS = Path("/home/dennis/re_3/github/tickflow-stock-panel/data/user_data/active_symbols.txt")
@@ -208,41 +225,305 @@ def _s150_name_map(request: Request, symbols: list[str]) -> dict[str, str]:
     return out
 
 
-def _s150_trade_rows(state: dict[str, Any], name_map: dict[str, str], limit: int = 20) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    cumulative = 0.0
+@lru_cache(maxsize=1)
+def _s150_backtest_trade_lookup() -> dict[tuple[str, str], dict[str, Any]]:
+    lookup: dict[tuple[str, str], dict[str, Any]] = {}
+    wanted_cols = [
+        "trade_date",
+        "stock_code",
+        "buy_price",
+        "sell_price",
+        "stock_net_ret",
+        "exit_time_hhmm",
+        "exit_reason",
+    ]
+    for path in S150_BACKTEST_TRADE_REPORTS:
+        if not path.exists():
+            continue
+        try:
+            df = pl.read_parquet(path)
+            cols = df.columns
+            selected = [col for col in wanted_cols if col in cols]
+            if "trade_date" not in selected or "stock_code" not in selected:
+                continue
+            rows = df.select(selected).to_dicts()
+        except Exception:
+            continue
+        for row in rows:
+            key = (_s150_date(row.get("trade_date", "")), _s150_stock(row.get("stock_code", "")))
+            if not key[0] or not key[1]:
+                continue
+            lookup.setdefault(key, row)
+    return lookup
+
+
+def _s150_tx_path(trade_date: str) -> Path:
+    return S150_TX_ROOT / trade_date[:4] / trade_date[4:6] / f"{trade_date[6:]}.parquet"
+
+
+@lru_cache(maxsize=1)
+def _s150_transaction_dates() -> list[str]:
+    dates: list[str] = []
+    if not S150_TX_ROOT.exists():
+        return dates
+    for path in S150_TX_ROOT.glob("*/*/[0-9][0-9].parquet"):
+        trade_date = f"{path.parent.parent.name}{path.parent.name}{path.stem}"
+        if len(trade_date) == 8 and trade_date.isdigit():
+            dates.append(trade_date)
+    return sorted(set(dates))
+
+
+def _s150_next_transaction_date(trade_date: str) -> str:
+    dates = _s150_transaction_dates()
+    for idx, date_text in enumerate(dates[:-1]):
+        if date_text == trade_date:
+            return dates[idx + 1]
+    return ""
+
+
+@lru_cache(maxsize=512)
+def _s150_symbol_transactions(trade_date: str, symbol: str) -> pl.DataFrame:
+    path = _s150_tx_path(trade_date)
+    if not path.exists():
+        return pl.DataFrame()
+    try:
+        lf = pl.scan_parquet(path)
+        cols = set(lf.collect_schema().names())
+        code_col = "stock_code" if "stock_code" in cols else "symbol"
+        order_expr = (
+            pl.col("chrono_row_in_symbol").cast(pl.Int64, strict=False)
+            if "chrono_row_in_symbol" in cols
+            else pl.int_range(0, pl.len()).cast(pl.Int64)
+        )
+        return (
+            lf.select(
+                pl.col(code_col).cast(pl.Utf8).str.extract(r"(\d+)", 1).str.zfill(6).alias("stock_code"),
+                pl.col("time_hhmm").cast(pl.Int64, strict=False).alias("time_hhmm"),
+                pl.col("time_hhmmss").cast(pl.Int64, strict=False).alias("time_hhmmss"),
+                pl.col("price").cast(pl.Float64, strict=False).alias("price"),
+                order_expr.alias("_row_order"),
+            )
+            .filter(
+                (pl.col("stock_code") == symbol)
+                & pl.col("price").is_not_null()
+                & (pl.col("price") > 0)
+            )
+            .sort(["time_hhmm", "time_hhmmss", "_row_order"])
+            .collect()
+        )
+    except Exception:
+        return pl.DataFrame()
+
+
+def _s150_entry_price_from_dd(trade_date: str, symbol: str) -> tuple[float | None, str]:
+    df = _s150_symbol_transactions(trade_date, symbol)
+    if df.is_empty():
+        return None, ""
+    after = df.filter(pl.col("time_hhmm") >= 1446).head(1)
+    if not after.is_empty():
+        row = after.row(0, named=True)
+        return _finite_float(row.get("price")), f"DD.parquet:{trade_date}:first_fill_ge_1446"
+    before = df.filter(pl.col("time_hhmm") <= 1446).tail(1)
+    if not before.is_empty():
+        row = before.row(0, named=True)
+        return _finite_float(row.get("price")), f"DD.parquet:{trade_date}:last_fill_le_1446"
+    return None, ""
+
+
+def _s150_sr004_replay_from_dd(entry_date: str, symbol: str, buy_price: float) -> dict[str, Any]:
+    if not (buy_price and math.isfinite(buy_price) and buy_price > 0):
+        return {}
+    exit_date = _s150_next_transaction_date(entry_date)
+    if not exit_date:
+        return {}
+    df = _s150_symbol_transactions(exit_date, symbol)
+    if df.is_empty():
+        return {}
+    path = df.filter((pl.col("time_hhmm") >= 930) & (pl.col("time_hhmm") <= 1430)).with_columns(
+        (pl.col("price") / float(buy_price) - 1.0).alias("gross_ret")
+    )
+    if path.is_empty():
+        return {}
+    for snapshot_time in [1000, 1030, 1100, 1300, 1330, 1400, 1430]:
+        upto = path.filter(pl.col("time_hhmm") <= snapshot_time)
+        if upto.is_empty():
+            continue
+        signal = upto.tail(1).row(0, named=True)
+        observed_mfe = _finite_float(upto.select(pl.max("gross_ret")).item())
+        signal_ret = _finite_float(signal.get("gross_ret"))
+        if observed_mfe is None or signal_ret is None:
+            continue
+        giveback = observed_mfe - signal_ret
+        if observed_mfe >= 0.03 and giveback >= 0.02:
+            fill = path.filter(pl.col("time_hhmm") > snapshot_time).head(1)
+            if fill.is_empty():
+                fill = path.tail(1)
+                reason = "rule_cap_fill"
+            else:
+                reason = "rule_next_fill"
+            row = fill.row(0, named=True)
+            price = _finite_float(row.get("price"))
+            gross = _finite_float(row.get("gross_ret"))
+            return {
+                "sell_price": price,
+                "day_return": gross - S150_ENTRY_FEE if gross is not None else None,
+                "exit_date": exit_date,
+                "exit_time_hhmm": int(row.get("time_hhmm")) if row.get("time_hhmm") is not None else None,
+                "exit_reason": reason,
+                "rule_fired": 1,
+                "sell_price_source": f"DD.parquet:{exit_date}:sr004_replay",
+                "sell_trigger_condition": (
+                    f"{S150_SR004_TRIGGER_CONDITION}；触发快照{snapshot_time}，"
+                    f"最高浮盈{observed_mfe:.2%}，回撤{giveback:.2%}"
+                ),
+            }
+    row = path.tail(1).row(0, named=True)
+    price = _finite_float(row.get("price"))
+    gross = _finite_float(row.get("gross_ret"))
+    return {
+        "sell_price": price,
+        "day_return": gross - S150_ENTRY_FEE if gross is not None else None,
+        "exit_date": exit_date,
+        "exit_time_hhmm": int(row.get("time_hhmm")) if row.get("time_hhmm") is not None else None,
+        "exit_reason": "forced_latest1430",
+        "rule_fired": 0,
+        "sell_price_source": f"DD.parquet:{exit_date}:latest_le_1430",
+        "sell_trigger_condition": f"{S150_SR004_TRIGGER_CONDITION}；未触发，使用14:30前最后成交",
+    }
+
+
+def _s150_trade_record_path(trade_date: str) -> Path:
+    return S150_TRADE_RECORD_ROOT / f"{trade_date}.json"
+
+
+def _load_saved_s150_trade_records(trade_date: str) -> dict[str, Any]:
+    path = _s150_trade_record_path(trade_date)
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _should_use_saved_s150_trade_records(trade_date: str, now: datetime) -> bool:
+    today = now.strftime("%Y%m%d")
+    if trade_date < today:
+        return True
+    if trade_date > today:
+        return False
+    return now.hour > 15 or (now.hour == 15 and now.minute >= 10)
+
+
+def _s150_enrich_trade_names(rows: list[dict[str, Any]], name_map: dict[str, str]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        rec = dict(row)
+        code = _s150_stock(rec.get("stock_code", ""))
+        rec["stock_code"] = code
+        if code and not rec.get("stock_name"):
+            rec["stock_name"] = name_map.get(code, "")
+        out.append(rec)
+    return out
+
+
+def _s150_trade_rows(
+    state: dict[str, Any],
+    name_map: dict[str, str],
+    limit: int = 20,
+    before_date: str | None = None,
+) -> list[dict[str, Any]]:
     active = [
         rec
         for rec in state.get("s146_history", [])
-        if int(rec.get("n_positions", 0) or 0) > 0 and _s150_stock(rec.get("selected_stock_code", ""))
+        if _s150_date(rec.get("trade_date", ""))
     ]
+    if before_date:
+        active = [rec for rec in active if _s150_date(rec.get("trade_date", "")) < before_date]
     active = sorted(active, key=lambda rec: _s150_date(rec.get("trade_date", "")))
+    active = active[-limit:]
+
+    rows: list[dict[str, Any]] = []
+    cumulative = 0.0
+    artifact_lookup = _s150_backtest_trade_lookup()
     for rec in active:
+        code = _s150_stock(rec.get("selected_stock_code", ""))
+        trade_date = _s150_date(rec.get("trade_date", ""))
+        n_positions = int(rec.get("n_positions", 0) or 0)
+        if n_positions <= 0 or not code:
+            rows.append(
+                {
+                    "index": len(rows) + 1,
+                    "date": trade_date,
+                    "stock_code": "",
+                    "stock_name": "空仓",
+                    "buy_price": None,
+                    "buy_price_source": "",
+                    "sell_price": None,
+                    "sell_price_source": "",
+                    "day_return": 0.0,
+                    "cumulative_return": cumulative,
+                    "settlement_status": str(rec.get("settlement_status", "") or "no_trade"),
+                    "exit_date": "",
+                    "exit_time_hhmm": None,
+                    "exit_reason": "no_trade",
+                    "sell_trigger_condition": "当日空仓，无买入、无卖出",
+                }
+            )
+            continue
+        artifact = artifact_lookup.get((trade_date, code), {})
+        buy_price = _finite_float(rec.get("buy_price")) or _finite_float(artifact.get("buy_price"))
+        buy_price_source = str(rec.get("buy_price_source", "") or artifact.get("buy_price_source", "") or "")
+        if buy_price is None:
+            buy_price, buy_price_source = _s150_entry_price_from_dd(trade_date, code)
+        replay = _s150_sr004_replay_from_dd(trade_date, code, buy_price) if buy_price is not None else {}
         day_ret = _finite_float(rec.get("day_ret"))
+        if day_ret is None:
+            day_ret = _finite_float(artifact.get("stock_net_ret"))
+        if day_ret is None:
+            day_ret = _finite_float(replay.get("day_return"))
+        sell_price = _finite_float(rec.get("sell_price")) or _finite_float(artifact.get("sell_price")) or _finite_float(replay.get("sell_price"))
+        sell_price_source = str(rec.get("sell_price_source", "") or artifact.get("sell_price_source", "") or replay.get("sell_price_source", "") or "")
+        exit_reason = str(rec.get("exit_reason", "") or artifact.get("exit_reason", "") or replay.get("exit_reason", "") or "")
+        exit_date = _s150_date(rec.get("exit_date", "")) or _s150_date(replay.get("exit_date", ""))
+        exit_time_hhmm = (
+            int(rec.get("exit_time_hhmm"))
+            if rec.get("exit_time_hhmm") is not None
+            else int(artifact.get("exit_time_hhmm")) if artifact.get("exit_time_hhmm") is not None
+            else int(replay.get("exit_time_hhmm")) if replay.get("exit_time_hhmm") is not None
+            else None
+        )
+        trigger_condition = str(replay.get("sell_trigger_condition", "") or "")
+        if not trigger_condition:
+            if exit_reason in {"rule_next_fill", "rule_cap_fill"}:
+                trigger_condition = S150_SR004_TRIGGER_CONDITION
+            elif exit_reason == "forced_latest1430":
+                trigger_condition = f"{S150_SR004_TRIGGER_CONDITION}；未触发，使用14:30前最后成交"
         if day_ret is not None:
             cumulative = (1.0 + cumulative) * (1.0 + day_ret) - 1.0
-        code = _s150_stock(rec.get("selected_stock_code", ""))
         rows.append(
             {
                 "index": len(rows) + 1,
-                "date": _s150_date(rec.get("trade_date", "")),
+                "date": trade_date,
                 "stock_code": code,
                 "stock_name": name_map.get(code, ""),
-                "buy_price": _finite_float(rec.get("buy_price")),
-                "sell_price": _finite_float(rec.get("sell_price")),
+                "buy_price": buy_price,
+                "buy_price_source": buy_price_source,
+                "sell_price": sell_price,
+                "sell_price_source": sell_price_source,
                 "day_return": day_ret,
                 "cumulative_return": cumulative if day_ret is not None else None,
                 "settlement_status": str(rec.get("settlement_status", "")),
-                "exit_date": _s150_date(rec.get("exit_date", "")),
-                "exit_time_hhmm": int(rec.get("exit_time_hhmm")) if rec.get("exit_time_hhmm") is not None else None,
-                "exit_reason": str(rec.get("exit_reason", "")),
+                "exit_date": exit_date,
+                "exit_time_hhmm": exit_time_hhmm,
+                "exit_reason": exit_reason,
+                "sell_trigger_condition": trigger_condition,
             }
         )
-    tail = rows[-limit:]
-    start_index = max(0, len(rows) - len(tail))
-    for offset, row in enumerate(tail, start=1):
-        row["index"] = start_index + offset
-    return tail
+    for offset, row in enumerate(rows, start=1):
+        row["index"] = offset
+    return rows
 
 
 # ================================================================
@@ -281,7 +562,8 @@ def _empty_s150_response(trade_date: str, message: str) -> dict[str, Any]:
         "trade_count": 0,
         "settled_trade_count": 0,
         "source": {"state_file": str(S150_STATE_FILE), "manifest_path": ""},
-        "update_rule": "每个交易日 14:46 以后读取 S150-SR004 预测结果。",
+        "trade_records_updated_at": "",
+        "update_rule": S150_TRADE_RECORD_UPDATE_RULE,
         "trades": [],
     }
 
@@ -674,7 +956,16 @@ def s150_sr004(request: Request, response: Response, trade_date: str | None = No
     if upstream_selected:
         all_symbols.add(upstream_selected)
     name_map = _s150_name_map(request, sorted(all_symbols))
-    trades = _s150_trade_rows(state, name_map, limit=20)
+    trade_boundary = requested_trade_date or latest_trade_date or now.strftime("%Y%m%d")
+    saved_records = _load_saved_s150_trade_records(trade_boundary)
+    saved_trade_record_path = ""
+    trade_records_updated_at = ""
+    if saved_records and _should_use_saved_s150_trade_records(trade_boundary, now):
+        trades = _s150_enrich_trade_names(saved_records.get("trades", []) if isinstance(saved_records.get("trades"), list) else [], name_map)
+        saved_trade_record_path = str(_s150_trade_record_path(trade_boundary))
+        trade_records_updated_at = str(saved_records.get("generated_at", "") or "")
+    else:
+        trades = _s150_trade_rows(state, name_map, limit=20, before_date=trade_boundary)
     settled_returns = [row["day_return"] for row in trades if row.get("day_return") is not None]
     avg_day_return = sum(settled_returns) / len(settled_returns) if settled_returns else None
 
@@ -715,8 +1006,10 @@ def s150_sr004(request: Request, response: Response, trade_date: str | None = No
         "source": {
             "state_file": str(S150_STATE_FILE),
             "manifest_path": manifest_path,
+            "trade_record_path": saved_trade_record_path,
         },
-        "update_rule": "每个交易日 14:46 以后读取 S150-SR004 预测结果。",
+        "trade_records_updated_at": trade_records_updated_at,
+        "update_rule": S150_TRADE_RECORD_UPDATE_RULE,
         "trades": trades,
     }
 

@@ -615,13 +615,16 @@ export interface S150Sr004TradeRow {
   stock_code: string
   stock_name: string
   buy_price: number | null
+  buy_price_source?: string
   sell_price: number | null
+  sell_price_source?: string
   day_return: number | null
   cumulative_return: number | null
   settlement_status: string
   exit_date: string
   exit_time_hhmm: number | null
   exit_reason: string
+  sell_trigger_condition?: string
 }
 
 export interface S150Sr004Result {
@@ -657,7 +660,9 @@ export interface S150Sr004Result {
   source: {
     state_file: string
     manifest_path: string
+    trade_record_path?: string
   }
+  trade_records_updated_at?: string
   update_rule: string
   trades: S150Sr004TradeRow[]
 }

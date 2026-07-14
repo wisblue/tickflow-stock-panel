@@ -540,6 +540,95 @@ function sellRuleText(contract?: string) {
   return raw
 }
 
+function exitReasonText(reason?: string) {
+  const raw = String(reason ?? '')
+  if (!raw) return '—'
+  if (raw === 'no_trade') return '空仓'
+  if (raw === 'rule_next_fill') return 'SR004 触发后下一笔'
+  if (raw === 'rule_cap_fill') return 'SR004 触发后封顶'
+  if (raw === 'forced_latest1430') return '14:30 强制卖出'
+  return raw.replaceAll('_', ' ')
+}
+
+function BacktestResultPanel({ data }: { data?: S150Sr004Result }) {
+  const [open, setOpen] = useState(false)
+  const trades = data?.trades ?? []
+  const avg = data?.avg_day_return
+  const settled = data?.settled_trade_count ?? 0
+  const updatedAt = data?.trade_records_updated_at || data?.data_updated_at || data?.checked_at
+
+  return (
+    <div className="rounded border border-border/70 bg-base/35">
+      <button
+        type="button"
+        onClick={() => setOpen(v => !v)}
+        className="flex w-full items-center justify-between gap-2 px-2 py-1.5 text-left text-[10px] text-secondary hover:text-foreground"
+      >
+        <span className="font-medium text-accent">回测结果</span>
+        <span className="font-mono text-muted">{open ? '收起' : '展开'}</span>
+      </button>
+
+      {open && (
+        <div className="border-t border-border/70 px-2 py-2">
+          <div className="grid grid-cols-2 gap-1.5">
+            <MiniMetric label="卖出规则" value={sellRuleText(data?.sell_rule_contract)} cls="text-foreground" />
+            <MiniMetric label="20日均收益" value={fmtStockPct(avg)} cls={pctClass(avg)} />
+            <MiniMetric label="记录数" value={`${settled}/${trades.length}`} cls="text-foreground" />
+            <MiniMetric label="动态更新" value={fmtDateTime(updatedAt)} cls="text-foreground" />
+          </div>
+
+          {trades.length === 0 ? (
+            <div className="py-5 text-center text-[11px] text-muted">暂无 S150-SR004 交易记录</div>
+          ) : (
+            <div className="mt-2 max-h-80 overflow-auto rounded border border-border/60">
+              <table className="min-w-[560px] w-full border-collapse text-[10px]">
+                <thead className="sticky top-0 bg-surface text-muted">
+                  <tr className="border-b border-border/60">
+                    <th className="px-2 py-1 text-left font-medium">日期</th>
+                    <th className="px-2 py-1 text-left font-medium">股票</th>
+                    <th className="px-2 py-1 text-right font-medium">买入</th>
+                    <th className="px-2 py-1 text-right font-medium">卖出</th>
+                    <th className="px-2 py-1 text-right font-medium">日收益</th>
+                    <th className="px-2 py-1 text-right font-medium">累计</th>
+                    <th className="px-2 py-1 text-left font-medium">触发条件</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {trades.map(row => (
+                    <tr key={`${row.date}-${row.stock_code}-${row.index}`} className="border-b border-border/40 last:border-0">
+                      <td className="whitespace-nowrap px-2 py-1 font-mono text-secondary">{fmtDate8(row.date)}</td>
+                      <td className="max-w-28 px-2 py-1">
+                        {row.exit_reason === 'no_trade' || !row.stock_code ? (
+                          <div className="text-foreground">空仓</div>
+                        ) : (
+                          <>
+                            <div className="font-mono text-foreground">{row.stock_code}</div>
+                            <div className="truncate text-[9px] text-muted" title={row.stock_name}>{row.stock_name || '—'}</div>
+                          </>
+                        )}
+                      </td>
+                      <td className="px-2 py-1 text-right font-mono text-foreground" title={row.buy_price_source || ''}>{fmtPrice(row.buy_price)}</td>
+                      <td className="px-2 py-1 text-right font-mono text-foreground" title={row.sell_price_source || ''}>{fmtPrice(row.sell_price)}</td>
+                      <td className={`px-2 py-1 text-right font-mono ${pctClass(row.day_return)}`}>{fmtStockPct(row.day_return)}</td>
+                      <td className={`px-2 py-1 text-right font-mono ${pctClass(row.cumulative_return)}`}>{fmtStockPct(row.cumulative_return)}</td>
+                      <td
+                        className="max-w-40 truncate px-2 py-1 text-secondary"
+                        title={row.sell_trigger_condition || row.exit_reason}
+                      >
+                        {row.sell_trigger_condition || exitReasonText(row.exit_reason)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function runtimeTone(status?: string) {
   if (status === 'ok') return { label: 'OK', cls: 'bg-bull/10 text-bull border-bull/25' }
   if (status === 'warn') return { label: 'WARN', cls: 'bg-warning/10 text-warning border-warning/25' }
@@ -713,6 +802,8 @@ function TodayFirstPickCard({ data, isLoading, isError, runtimeStatus, runtimeLo
           <div className="rounded border border-border/70 bg-base/35 px-2 py-1.5 text-[10px] leading-relaxed text-secondary">
             卖出规则: <span className="text-foreground">{sellRuleText(data.sell_rule_contract)}</span>
           </div>
+
+          <BacktestResultPanel data={data} />
         </div>
       )}
     </section>
