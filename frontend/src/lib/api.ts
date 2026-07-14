@@ -1,7 +1,6 @@
 // 后端 API 客户端 — 全项目统一入口
 //
-// Dev:Vite 代理 /api 到 :3018
-// Prod:同源(FastAPI 托管前端 dist)
+// Dev/Prod:同源(FastAPI 在唯一端口托管 API + 前端 dist)
 
 import { toast } from '@/components/Toast'
 
@@ -1456,8 +1455,12 @@ export const api = {
   s150Sr004: (tradeDate?: string) => {
     const params = new URLSearchParams()
     if (tradeDate) params.set('trade_date', tradeDate)
+    params.set('_ts', String(Date.now()))
     const qs = params.toString()
-    return request<S150Sr004Result>(`/api/backtest/s150-sr004${qs ? `?${qs}` : ''}`)
+    return request<S150Sr004Result>(`/api/backtest/s150-sr004${qs ? `?${qs}` : ''}`, {
+      cache: 'no-store',
+      headers: { 'Cache-Control': 'no-cache' },
+    })
   },
 
   sr004RealtimeExit: (symbol: string, tradeDate?: string) => {

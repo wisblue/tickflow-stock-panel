@@ -1,26 +1,24 @@
-# tickflow-stock-panel - one-shot launcher for backend + frontend (Windows / PowerShell)
+# tickflow-stock-panel - one-port Web launcher (Windows / PowerShell)
 #
 # Usage:
 #   .\dev.ps1
-#   .\dev.ps1 -BackendPort 8000 -FrontendPort 5173
+#   .\dev.ps1 -BackendPort 8000
 #   $env:BACKEND_PORT='8000'; .\dev.ps1
 #
-# Ctrl-C closes both processes.
+# Ctrl-C closes the service.
 #
 # If you see "running scripts is disabled":
 #   Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 
 [CmdletBinding()]
 param(
-    [int]$BackendPort  = 0,
-    [int]$FrontendPort = 0
+    [int]$BackendPort  = 0
 )
 
 $ErrorActionPreference = 'Stop'
 
 # Port precedence: CLI arg > env var > default
 if ($BackendPort  -le 0) { $BackendPort  = if ($env:BACKEND_PORT)  { [int]$env:BACKEND_PORT }  else { 3018 } }
-if ($FrontendPort -le 0) { $FrontendPort = if ($env:FRONTEND_PORT) { [int]$env:FRONTEND_PORT } else { 3011 } }
 
 # Force UTF-8 console output so child process logs aren't garbled
 try {
@@ -105,8 +103,7 @@ function Free-Port($name, $port) {
     }
 }
 
-Free-Port 'backend'  $BackendPort
-Free-Port 'frontend' $FrontendPort
+Free-Port 'web' $BackendPort
 
 # ===== 3. First-time dependency install =====
 if (-not (Test-Path (Join-Path $BackendDir '.venv'))) {
@@ -125,23 +122,28 @@ if (-not (Test-Path (Join-Path $FrontendDir 'node_modules'))) {
     Log-Ok 'frontend deps installed'
 }
 
-# ===== 4. Banner (ASCII so it renders on any codepage) =====
+# ===== 4. Build frontend dist =====
+Log-Info 'building frontend dist for same-port serving...'
+Push-Location $FrontendDir
+try { & pnpm build } finally { Pop-Location }
+if ($LASTEXITCODE -ne 0) { Log-Err 'pnpm build failed'; exit 1 }
+Log-Ok 'frontend dist updated'
+
+# ===== 5. Banner (ASCII so it renders on any codepage) =====
 Write-Host ''
 Write-Host '+----------------------------------------------+' -ForegroundColor Blue
 Write-Host '|  tickflow-stock-panel                        |' -ForegroundColor Blue
 Write-Host '|                                              |' -ForegroundColor Blue
-Write-Host "|  backend   http://localhost:$BackendPort"      -ForegroundColor Blue
-Write-Host "|  frontend  http://localhost:$FrontendPort"     -ForegroundColor Blue
+Write-Host "|  web       http://localhost:$BackendPort"      -ForegroundColor Blue
 Write-Host '|                                              |' -ForegroundColor Blue
-Write-Host '|  Ctrl-C closes both                          |' -ForegroundColor Blue
+Write-Host '|  FastAPI serves API + frontend dist          |' -ForegroundColor Blue
 Write-Host '+----------------------------------------------+' -ForegroundColor Blue
 Write-Host ''
 
-# ===== 5. Launch jobs =====
+# ===== 6. Launch job =====
 # Each job writes its $PID to a temp file so the main thread can find the
 # child powershell.exe and taskkill /T the whole process tree on exit.
 $backendPidFile  = [System.IO.Path]::GetTempFileName()
-$frontendPidFile = [System.IO.Path]::GetTempFileName()
 
 $backendJob = Start-Job -Name 'backend' -ScriptBlock {
     param($pidFile, $dir, $port)
@@ -150,13 +152,6 @@ $backendJob = Start-Job -Name 'backend' -ScriptBlock {
     Set-Location $dir
     & .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 0.0.0.0 --port $port 2>&1
 } -ArgumentList $backendPidFile, $BackendDir, $BackendPort
-
-$frontendJob = Start-Job -Name 'frontend' -ScriptBlock {
-    param($pidFile, $dir, $port)
-    $PID | Out-File -FilePath $pidFile -Encoding ascii -Force
-    Set-Location $dir
-    & pnpm dev --host 0.0.0.0 --port $port 2>&1
-} -ArgumentList $frontendPidFile, $FrontendDir, $FrontendPort
 
 # Wait up to 5 seconds for the PID files to materialise
 function Read-JobPid($file) {
@@ -170,9 +165,8 @@ function Read-JobPid($file) {
     return $null
 }
 $backendChildPid  = Read-JobPid $backendPidFile
-$frontendChildPid = Read-JobPid $frontendPidFile
 
-# ===== 6. Cleanup =====
+# ===== 7. Cleanup =====
 $script:cleaning = $false
 function Cleanup-All {
     if ($script:cleaning) { return }
@@ -180,25 +174,25 @@ function Cleanup-All {
     Write-Host ''
     Log-Info 'shutting down...'
 
-    foreach ($p in @($backendChildPid, $frontendChildPid)) {
+    foreach ($p in @($backendChildPid)) {
         if ($p) {
             # /T kills the whole process tree (the job's powershell + uvicorn/vite)
             $null = & cmd /c "taskkill /F /T /PID $p 2>nul"
         }
     }
-    foreach ($j in @($backendJob, $frontendJob)) {
+    foreach ($j in @($backendJob)) {
         if ($j) {
             Stop-Job   $j -ErrorAction SilentlyContinue
             Remove-Job $j -Force -ErrorAction SilentlyContinue
         }
     }
-    foreach ($f in @($backendPidFile, $frontendPidFile)) {
+    foreach ($f in @($backendPidFile)) {
         Remove-Item $f -Force -ErrorAction SilentlyContinue
     }
     Log-Ok 'bye'
 }
 
-# ===== 7. Main loop - pump output, handle Ctrl-C =====
+# ===== 8. Main loop - pump output, handle Ctrl-C =====
 # Treat Ctrl-C as input so try/finally is guaranteed to run.
 $prevCtrlC = [Console]::TreatControlCAsInput
 try {
@@ -220,16 +214,8 @@ try {
             }
         }
 
-        $fOut = Receive-Job $frontendJob -ErrorAction SilentlyContinue
-        if ($fOut) {
-            foreach ($line in $fOut) {
-                Write-Host '[frontend] ' -NoNewline -ForegroundColor Green
-                Write-Host $line
-            }
-        }
-
-        if ($backendJob.State -ne 'Running' -or $frontendJob.State -ne 'Running') {
-            Log-Warn 'one of the processes exited; closing the other...'
+        if ($backendJob.State -ne 'Running') {
+            Log-Warn 'backend process exited'
             break
         }
 

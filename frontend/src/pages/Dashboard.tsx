@@ -736,8 +736,10 @@ export function Dashboard() {
   const s150 = useQuery({
     queryKey: [...QK.s150Sr004, 'today'],
     queryFn: () => api.s150Sr004('today'),
-    staleTime: 30_000,
-    refetchInterval: 60_000,
+    staleTime: 0,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: 'always',
+    refetchInterval: 30_000,
     refetchIntervalInBackground: true,
   })
   const s150Runtime = useQuery({

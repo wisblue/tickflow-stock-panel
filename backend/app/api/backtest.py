@@ -16,7 +16,7 @@ from typing import Any
 from typing import Literal
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -621,8 +621,10 @@ def _build_s150_runtime_status(trade_date: str) -> dict[str, Any]:
 
 
 @router.get("/s150-sr004")
-def s150_sr004(request: Request, trade_date: str | None = None):
+def s150_sr004(request: Request, response: Response, trade_date: str | None = None):
     """S150-SR004 live recommendation and settled daily trade ledger."""
+    response.headers["Cache-Control"] = "no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
     checked_at = now.isoformat()
     requested_trade_date = _resolve_s150_request_date(trade_date)

@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# tickflow-stock-panel — 一键启动前后端
+# tickflow-stock-panel — 单端口启动 Web
 #
 # 用法:
-#   ./dev.sh                          # 默认 backend:3018  frontend:3011
-#   BACKEND_PORT=8000 ./dev.sh        # 改后端端口
-#   FRONTEND_PORT=5173 ./dev.sh       # 改前端端口
+#   ./dev.sh                          # 默认 http://localhost:3018
+#   BACKEND_PORT=8000 ./dev.sh        # 改 Web 端口
 #
-# Ctrl-C 同时关闭两端。
+# Ctrl-C 关闭服务。
 
 set -euo pipefail
 
@@ -14,7 +13,6 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$ROOT/backend"
 FRONTEND_DIR="$ROOT/frontend"
 BACKEND_PORT="${BACKEND_PORT:-3018}"
-FRONTEND_PORT="${FRONTEND_PORT:-3011}"
 
 BLUE='\033[0;34m'
 GREEN='\033[0;32m'
@@ -68,8 +66,7 @@ free_port() {
   fi
   ok "端口 $port 已释放"
 }
-free_port backend  "$BACKEND_PORT"
-free_port frontend "$FRONTEND_PORT"
+free_port web "$BACKEND_PORT"
 
 # ===== 3. 首次依赖安装 =====
 if [ ! -d "$BACKEND_DIR/.venv" ]; then
@@ -84,7 +81,12 @@ if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
   ok "前端依赖装好了"
 fi
 
-# ===== 4. 启动 + 日志前缀 =====
+# ===== 4. 构建前端静态包 =====
+info "构建前端静态包 — 由后端在同一端口托管..."
+( cd "$FRONTEND_DIR" && pnpm build )
+ok "前端 dist 已更新"
+
+# ===== 5. 启动 + 日志前缀 =====
 PIDS=()
 
 cleanup() {
@@ -111,10 +113,9 @@ echo
 echo -e "${BLUE}╭──────────────────────────────────────────────╮${NC}"
 echo -e "${BLUE}│${NC}  ${GREEN}tickflow-stock-panel${NC}                        ${BLUE}│${NC}"
 echo -e "${BLUE}│${NC}                                              ${BLUE}│${NC}"
-echo -e "${BLUE}│${NC}  backend   ${YELLOW}http://localhost:$BACKEND_PORT${NC}          ${BLUE}│${NC}"
-echo -e "${BLUE}│${NC}  frontend  ${YELLOW}http://localhost:$FRONTEND_PORT${NC}          ${BLUE}│${NC}"
+echo -e "${BLUE}│${NC}  web       ${YELLOW}http://localhost:$BACKEND_PORT${NC}          ${BLUE}│${NC}"
 echo -e "${BLUE}│${NC}                                              ${BLUE}│${NC}"
-echo -e "${BLUE}│${NC}  Ctrl-C 同时关闭两端                          ${BLUE}│${NC}"
+echo -e "${BLUE}│${NC}  FastAPI serves API + frontend dist on one port ${BLUE}│${NC}"
 echo -e "${BLUE}╰──────────────────────────────────────────────╯${NC}"
 echo
 
@@ -125,18 +126,4 @@ echo
 ) &
 PIDS+=("$!")
 
-(
-  cd "$FRONTEND_DIR"
-  pnpm dev --host 0.0.0.0 --port "$FRONTEND_PORT" 2>&1 \
-    | prefix_awk "$(printf "${GREEN}[frontend]${NC} ")"
-) &
-PIDS+=("$!")
-
-# 等任一退出(bash 4.3+)或全部退出(老 bash)
-if wait -n 2>/dev/null; then
-  warn "其中一个进程退出,正在关闭另一个..."
-  cleanup
-else
-  # 老 bash 没有 wait -n,退化为 wait 全部
-  wait
-fi
+wait

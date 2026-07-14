@@ -17,20 +17,17 @@ cp .env.example .env       # 按需填 TICKFLOW_API_KEY(留空 = None 模式)
 ./dev.sh                   # Windows: .\dev.ps1
 ```
 
-`dev.sh` 自动检查 / 下载依赖、释放端口、同时起前后端,Ctrl-C 一并关闭。默认:
+`dev.sh` 自动检查 / 下载依赖、释放端口、构建前端静态包,并由后端在唯一端口托管 API + Web。默认:
 
-- 后端 → <http://localhost:3018> · 前端 → <http://localhost:3011>
-- 自定义端口:`BACKEND_PORT=8000 FRONTEND_PORT=5173 ./dev.sh`
+- Web → <http://localhost:3018>
+- 自定义端口:`BACKEND_PORT=8000 ./dev.sh`
 
-### 手动分别启动(不想用 dev.sh)
+### 手动单端口启动(不想用 dev.sh)
 
 ```bash
-# 后端
-cd backend && uv sync --extra backtest   # 含回测依赖
+cd frontend && pnpm install && pnpm build
+cd ../backend && uv sync --extra backtest
 uv run uvicorn app.main:app --reload --port 3018
-
-# 前端
-cd frontend && pnpm install && pnpm dev   # http://localhost:3011
 ```
 
 ---
