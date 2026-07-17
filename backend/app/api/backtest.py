@@ -50,7 +50,7 @@ S150_PRIORITY_SCRIPT = S150_LIVE_ROOT / "scripts" / "run_s150_as_priority_1445.s
 S150_SR004_SCRIPT = S150_LIVE_ROOT / "scripts" / "run_s150_sr004_live.py"
 S150_RUNBOOK = S150_LIVE_ROOT / "reports" / "s150_live_runbook.md"
 S150_PRIORITY_LOG_DIR = S150_LIVE_ROOT / "logs" / "s150_as_priority"
-S150_TRADE_RECORD_ROOT = S150_LIVE_ROOT / "runs" / "s150_trade_records"
+S150_TRADE_RECORD_ROOT = settings.data_dir / "user_data" / "s150_trade_records"
 S150_BACKTEST_TRADE_REPORTS = [
     Path("/home/dennis/re_3/codex/prediction/Models/daily_35pct/sell_rules/runs/SR004_profit_trailing_latest1430_20260704/daily_trade_report.parquet"),
     Path("/home/dennis/re_3/codex/prediction/Models/daily_35pct/runs/s120_sa_top5_replacement_sr004_20260704/s120_candidate_sr004_trade_report.parquet"),
@@ -67,7 +67,7 @@ S150_TRADE_RECORD_UPDATE_RULE = (
 )
 GO_FETCHER_ROOT = Path("/home/dennis/re_3/github/go-fetcher")
 GO_FETCHER_LOG_DIR = GO_FETCHER_ROOT / "logs"
-GO_FETCHER_ACTIVE_SYMBOLS = Path("/home/dennis/re_3/github/tickflow-stock-panel/data/user_data/active_symbols.txt")
+GO_FETCHER_ACTIVE_SYMBOLS = settings.data_dir / "user_data" / "active_symbols.txt"
 TDX_REDIS_ADDR = "192.168.50.68:6379"
 TDX_REDIS_DB = 15
 TDX_REDIS_PREFIX = "tdx:trans"
@@ -809,7 +809,6 @@ def _build_s150_runtime_status(trade_date: str) -> dict[str, Any]:
         "ok" if S150_PRIORITY_LOG_DIR.exists() else "fail",
         f"日志目录存在: {S150_PRIORITY_LOG_DIR}" if S150_PRIORITY_LOG_DIR.exists() else f"日志目录缺失: {S150_PRIORITY_LOG_DIR}",
         {"path": str(S150_PRIORITY_LOG_DIR)},
-        fixable=not S150_PRIORITY_LOG_DIR.exists(),
     ))
 
     ps_lines = _process_lines()
@@ -821,7 +820,6 @@ def _build_s150_runtime_status(trade_date: str) -> dict[str, Any]:
         "ok" if prod_fetcher else "fail",
         f"生产 realtime fetcher 正在运行，进程数 {len(prod_fetcher)}" if prod_fetcher else "未发现生产 go-fetcher realtime 进程",
         {"process_count": len(prod_fetcher)},
-        fixable=not prod_fetcher,
     ))
     if fake_fetcher:
         items.append(_status_item(
@@ -890,7 +888,7 @@ def _build_s150_runtime_status(trade_date: str) -> dict[str, Any]:
     else:
         goal_status = "fail"
         goal_msg = "14:46 后 goal-status 缺失"
-    items.append(_status_item("s150_goal_status", "S150 goal-status", goal_status, goal_msg, {"path": str(goal_path), "payload": goal}, fixable=manifest_path.exists()))
+    items.append(_status_item("s150_goal_status", "S150 goal-status", goal_status, goal_msg, {"path": str(goal_path), "payload": goal}))
 
     return {
         "trade_date": trade_date,
@@ -1023,16 +1021,21 @@ def s150_runtime_status(trade_date: str | None = None):
 
 @router.post("/s150-runtime-fix")
 def s150_runtime_fix(trade_date: str | None = None):
-    """Apply safe one-click fixes, then return a fresh runtime status."""
+    """Apply safe fixes that do not write outside the panel project."""
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
     requested = _resolve_s150_request_date(trade_date) or now.strftime("%Y%m%d")
     fixes: list[dict[str, Any]] = []
 
-    try:
-        S150_PRIORITY_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        fixes.append({"key": "s150_log_dir", "status": "ok", "message": f"ensured {S150_PRIORITY_LOG_DIR}"})
-    except Exception as exc:  # noqa: BLE001
-        fixes.append({"key": "s150_log_dir", "status": "fail", "message": str(exc)})
+    fixes.append({
+        "key": "s150_log_dir",
+        "status": "skipped" if not S150_PRIORITY_LOG_DIR.exists() else "ok",
+        "message": (
+            f"external log directory already exists: {S150_PRIORITY_LOG_DIR}"
+            if S150_PRIORITY_LOG_DIR.exists()
+            else "web write policy forbids creating prediction/go-fetcher directories; create it from shell if needed"
+        ),
+        "path": str(S150_PRIORITY_LOG_DIR),
+    })
 
     fake_processes = _fake_fetcher_processes()
     fake_pids = sorted({int(proc["pid"]) for proc in fake_processes})
@@ -1068,28 +1071,12 @@ def s150_runtime_fix(trade_date: str | None = None):
         if not script.exists():
             fixes.append({"key": "go_fetcher_process", "status": "fail", "message": f"missing start script: {script}"})
         else:
-            try:
-                subprocess.Popen(
-                    ["bash", str(script)],
-                    cwd=str(GO_FETCHER_ROOT),
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                )
-                time.sleep(3.0)
-                running = _prod_fetcher_processes()
-                fixes.append({
-                    "key": "go_fetcher_process",
-                    "status": "ok" if running else "warn",
-                    "message": (
-                        f"started production realtime fetcher, process_count={len(running)}"
-                        if running
-                        else "start command launched but production process not detected yet"
-                    ),
-                    "process_count": len(running),
-                })
-            except Exception as exc:  # noqa: BLE001
-                fixes.append({"key": "go_fetcher_process", "status": "fail", "message": str(exc)})
+            fixes.append({
+                "key": "go_fetcher_process",
+                "status": "skipped",
+                "message": "web write policy forbids starting external go-fetcher from the panel; start it from shell/cron",
+                "command": f"cd {GO_FETCHER_ROOT} && bash {script}",
+            })
 
     out = S150_RUN_ROOT / f"{requested}_asof1445"
     manifest_path = out / "manifest.json"
@@ -1108,25 +1095,13 @@ def s150_runtime_fix(trade_date: str | None = None):
             "180",
             "--require-latency-budget",
         ]
-        try:
-            proc = subprocess.run(
-                cmd,
-                cwd=str(SR004_WORKDIR),
-                capture_output=True,
-                text=True,
-                timeout=45,
-                check=False,
-            )
-            fixes.append({
-                "key": "s150_goal_status",
-                "status": "ok" if proc.returncode == 0 else "warn",
-                "message": "refreshed goal-status" if proc.returncode == 0 else "goal-status refreshed but not passing",
-                "returncode": int(proc.returncode),
-                "stdout_tail": proc.stdout[-1000:],
-                "stderr_tail": proc.stderr[-1000:],
-            })
-        except Exception as exc:  # noqa: BLE001
-            fixes.append({"key": "s150_goal_status", "status": "fail", "message": str(exc)})
+        fixes.append({
+            "key": "s150_goal_status",
+            "status": "skipped",
+            "message": "web write policy forbids refreshing prediction goal-status from the panel; run from shell if needed",
+            "command": " ".join(cmd),
+            "cwd": str(SR004_WORKDIR),
+        })
     else:
         fixes.append({
             "key": "s150_goal_status",

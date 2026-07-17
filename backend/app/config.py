@@ -61,6 +61,26 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent
 
 
+def _write_root() -> Path:
+    """Writable root for application-owned files.
+
+    Dev/Docker: the source project root. Frozen desktop: the executable
+    directory. Runtime data must stay under this root so the web process never
+    writes into sibling research/checkpoint workspaces by accident.
+    """
+    if _IS_FROZEN:
+        return Path(sys.executable).resolve().parent
+    return _PROJECT_ROOT
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 _PROJECT_ROOT = _project_root()
 _RESOURCE_ROOT = _resource_root()
 
@@ -106,7 +126,7 @@ class Settings(BaseSettings):
     auth_password: str = ""
 
     # Data — frozen: exe 同级 data/ 子目录; 非 frozen: 项目根 data/
-    # (均可被环境变量 DATA_DIR 覆盖, pydantic-settings 自动注入)
+    # 可被 DATA_DIR 覆盖, 但解析后必须仍在项目/安装目录内。
     data_dir: Path = _user_data_root()
 
     # tiers.yaml 路径 — frozen: 资源目录内; 非 frozen: 项目根目录
@@ -117,10 +137,18 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _resolve_paths(self) -> Settings:
-        """确保 data_dir 是绝对路径（环境变量传入的相对路径基于项目根目录解析）。"""
-        if not self.data_dir.is_absolute():
-            # 相对路径基于项目根目录解析，而非 CWD
-            self.data_dir = (_PROJECT_ROOT / self.data_dir).resolve()
+        """Resolve and confine data_dir to the application project directory."""
+        write_root = _write_root().resolve()
+        data_dir = Path(self.data_dir).expanduser()
+        if not data_dir.is_absolute():
+            # 相对路径基于项目/安装根目录解析，而非 CWD
+            data_dir = write_root / data_dir
+        data_dir = data_dir.resolve()
+        if not _is_relative_to(data_dir, write_root):
+            raise ValueError(
+                f"DATA_DIR must stay under TickFlow Stock Panel directory: {write_root}; got {data_dir}"
+            )
+        self.data_dir = data_dir
         return self
 
     @property

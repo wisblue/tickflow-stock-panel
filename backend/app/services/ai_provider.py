@@ -201,7 +201,7 @@ async def _run_codex_cli(
     timeout: float,
 ) -> str:
     prompt = _codex_prompt(messages, max_tokens=max_tokens)
-    with tempfile.TemporaryDirectory(prefix="tickflow-codex-run-") as run_dir:
+    with tempfile.TemporaryDirectory(prefix="tickflow-codex-run-", dir=_provider_tmp_dir("codex-cli")) as run_dir:
         run_path = Path(run_dir)
         codex_home_path = run_path / "codex-home"
         workspace_path = run_path / "workspace"
@@ -258,6 +258,12 @@ async def _run_codex_cli(
         if not result:
             raise RuntimeError("Codex CLI 未返回内容")
         return result
+
+
+def _provider_tmp_dir(name: str) -> Path:
+    tmp_root = settings.data_dir / "tmp" / name
+    tmp_root.mkdir(parents=True, exist_ok=True)
+    return tmp_root
 
 
 def _codex_prompt(messages: Sequence[Message], *, max_tokens: int) -> str:

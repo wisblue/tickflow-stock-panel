@@ -73,7 +73,25 @@ def _load_rows() -> list[dict]:
 def _write_rows(rows: list[dict]) -> None:
     rows = [row for row in rows if normalize_symbol(str(row.get("symbol") or ""))]
     _json_path().write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
-    active_symbols_path().write_text("\n".join(row["symbol"] for row in rows) + ("\n" if rows else ""), encoding="utf-8")
+    existing_symbols: list[str] = []
+    p = active_symbols_path()
+    if p.exists():
+        try:
+            for raw in re.split(r"[\s,]+", p.read_text(encoding="utf-8", errors="ignore")):
+                symbol = normalize_symbol(raw)
+                if symbol:
+                    existing_symbols.append(symbol)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("active_symbols.txt read failed before merge: %s", exc)
+
+    merged: list[str] = []
+    seen: set[str] = set()
+    for symbol in [*existing_symbols, *(row["symbol"] for row in rows)]:
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+        merged.append(symbol)
+    p.write_text("\n".join(merged) + ("\n" if merged else ""), encoding="utf-8")
 
 
 def list_symbols() -> list[dict]:

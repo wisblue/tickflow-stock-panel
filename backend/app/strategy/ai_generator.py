@@ -8,7 +8,6 @@ from __future__ import annotations
 import ast
 import logging
 import re
-import tempfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)

@@ -34,6 +34,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/ext-data", tags=["ext-data"])
 
 
+def _request_tmp_dir(request: Request, name: str) -> Path:
+    tmp_root = _data_dir(request) / "tmp" / name
+    tmp_root.mkdir(parents=True, exist_ok=True)
+    return tmp_root
+
+
 # ---------------------------------------------------------------------------
 # Pydantic 模型
 # ---------------------------------------------------------------------------
@@ -430,7 +436,7 @@ async def upload_data(
         raise HTTPException(400, "仅支持 CSV / Excel 文件")
 
     # 写到临时文件再解析
-    tmp_dir = Path(tempfile.mkdtemp())
+    tmp_dir = Path(tempfile.mkdtemp(dir=_request_tmp_dir(request, "uploads")))
     tmp_path = tmp_dir / f"upload{suffix}"
     try:
         with tmp_path.open("wb") as f:
@@ -663,7 +669,7 @@ async def detect_fields(
     if suffix not in (".csv", ".xlsx", ".xls"):
         raise HTTPException(400, "仅支持 CSV / Excel 文件")
 
-    tmp_dir = Path(tempfile.mkdtemp())
+    tmp_dir = Path(tempfile.mkdtemp(dir=_request_tmp_dir(request, "uploads")))
     tmp_path = tmp_dir / f"upload{suffix}"
     try:
         with tmp_path.open("wb") as f:
