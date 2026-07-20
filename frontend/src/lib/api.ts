@@ -690,7 +690,7 @@ export interface Sr004RealtimeExitResult {
   [key: string]: any
 }
 
-export interface ModelV4BbRealtimeRow {
+export interface ModelV4Sr013RealtimeRow {
   stock_code: string
   stock_name: string
   signal_time?: string
@@ -701,26 +701,34 @@ export interface ModelV4BbRealtimeRow {
   actual_return?: number | null
   open_price?: number | null
   open_price_source?: string
+  entry_date?: string
+  t_close_price?: number | null
+  t_close_price_source?: string
   latest_price?: number | null
   buy_price?: number | null
   buy_price_source?: string
-  status?: 'sell_triggered' | 'holding' | 'waiting_for_buy_price' | string
+  sell_reason?: string
+  sell_reason_label?: string
+  observed_mfe?: number | null
+  giveback_from_mfe?: number | null
+  status?: 'sell_triggered' | 'sell_triggered_fill_pending' | 'holding' | 'waiting_for_reference_price' | 'waiting_for_transaction_data' | string
   event?: Record<string, any> | null
   last_transaction_time?: string
   data_source?: string
   parameters?: Record<string, any>
 }
 
-export interface ModelV4BbRealtimeOutput {
+export interface ModelV4Sr013RealtimeOutput {
   available: boolean
   trade_date: string
   checked_at: string
   refresh_interval_seconds: number
   rule_name: string
   rule_contract: string
+  rule_description?: string
   symbols_source: string
   quote_request: string
-  rows: ModelV4BbRealtimeRow[]
+  rows: ModelV4Sr013RealtimeRow[]
   count: number
   errors?: string[]
 }
@@ -1509,12 +1517,12 @@ export const api = {
     return request<Sr004RealtimeExitResult>(`/api/backtest/sr004-realtime-exit?${params.toString()}`)
   },
 
-  modelV4BbRealtime: (tradeDate?: string) => {
+  modelV4Sr013Realtime: (tradeDate?: string) => {
     const params = new URLSearchParams()
     if (tradeDate) params.set('trade_date', tradeDate)
     const qs = params.toString()
-    return request<ModelV4BbRealtimeOutput>(
-      `/api/model-v4/bb-realtime/positions${qs ? `?${qs}` : ''}`,
+    return request<ModelV4Sr013RealtimeOutput>(
+      `/api/model-v4/sr013-realtime/positions${qs ? `?${qs}` : ''}`,
       { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' } },
     )
   },
