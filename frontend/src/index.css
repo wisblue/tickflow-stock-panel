@@ -65,6 +65,19 @@ html.dark {
 .tabular { font-variant-numeric: tabular-nums; }
 .num { font-family: theme('fontFamily.mono'); font-variant-numeric: tabular-nums; }
 
+@keyframes model-v4-ticker-scroll {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+.model-v4-ticker-track {
+  animation: model-v4-ticker-scroll 42s linear infinite;
+}
+
+.model-v4-ticker-track:hover {
+  animation-play-state: paused;
+}
+
 /* 默认 1px 细分隔线(暗色用边框区分层次,不用 shadow) */
 * { border-color: hsl(var(--border)); }
 

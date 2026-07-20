@@ -690,6 +690,41 @@ export interface Sr004RealtimeExitResult {
   [key: string]: any
 }
 
+export interface ModelV4BbRealtimeRow {
+  stock_code: string
+  stock_name: string
+  signal_time?: string
+  sell_time?: string
+  sell_price?: number | null
+  sell_rule?: string
+  gross_return?: number | null
+  actual_return?: number | null
+  open_price?: number | null
+  open_price_source?: string
+  latest_price?: number | null
+  buy_price?: number | null
+  buy_price_source?: string
+  status?: 'sell_triggered' | 'holding' | 'waiting_for_buy_price' | string
+  event?: Record<string, any> | null
+  last_transaction_time?: string
+  data_source?: string
+  parameters?: Record<string, any>
+}
+
+export interface ModelV4BbRealtimeOutput {
+  available: boolean
+  trade_date: string
+  checked_at: string
+  refresh_interval_seconds: number
+  rule_name: string
+  rule_contract: string
+  symbols_source: string
+  quote_request: string
+  rows: ModelV4BbRealtimeRow[]
+  count: number
+  errors?: string[]
+}
+
 export type RuntimeStatusLevel = 'ok' | 'warn' | 'fail' | 'pending'
 
 export interface S150RuntimeStatusItem {
@@ -1472,6 +1507,16 @@ export const api = {
     const params = new URLSearchParams({ symbol })
     if (tradeDate) params.set('trade_date', tradeDate)
     return request<Sr004RealtimeExitResult>(`/api/backtest/sr004-realtime-exit?${params.toString()}`)
+  },
+
+  modelV4BbRealtime: (tradeDate?: string) => {
+    const params = new URLSearchParams()
+    if (tradeDate) params.set('trade_date', tradeDate)
+    const qs = params.toString()
+    return request<ModelV4BbRealtimeOutput>(
+      `/api/model-v4/bb-realtime/positions${qs ? `?${qs}` : ''}`,
+      { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' } },
+    )
   },
 
   s150RuntimeStatus: (tradeDate?: string) => {

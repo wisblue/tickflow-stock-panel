@@ -262,21 +262,23 @@ function buildOption(
   const avgData = new Array(FULL_DAY_TIMES.length).fill(null) as (number | null)[]
   const volumes = new Array(FULL_DAY_TIMES.length).fill(null) as (any | null)[]
   const subIndicators = (['macd', 'rsi', 'kdj'] as const).filter(key => indicators.includes(key))
-  const showSubGrid = subIndicators.length > 0
   const showMoneyFlow = indicators.includes('moneyflow')
+  const panelKeys: IntradayIndicator[] = [...subIndicators, ...(showMoneyFlow ? ['moneyflow' as const] : [])]
+  const showSubGrid = panelKeys.length > 0
   const boll = indicators.includes('boll') ? computeBoll(data) : null
   const macd = indicators.includes('macd') ? computeMacd(data) : null
   const rsi = indicators.includes('rsi') ? computeRsi(data) : null
   const kdj = indicators.includes('kdj') ? computeKdj(data) : null
   const moneyFlow = showMoneyFlow ? buildMoneyFlowSeries(moneyFlowRows) : null
-  const subGridIndex = (key: 'macd' | 'rsi' | 'kdj') => {
-    const idx = subIndicators.indexOf(key)
+  const panelGridIndex = (key: IntradayIndicator) => {
+    const idx = panelKeys.indexOf(key)
     return idx >= 0 ? idx + 1 : -1
   }
-  const macdGridIndex = subGridIndex('macd')
-  const rsiGridIndex = subGridIndex('rsi')
-  const kdjGridIndex = subGridIndex('kdj')
-  const volumeGridIndex = subIndicators.length + 1
+  const macdGridIndex = panelGridIndex('macd')
+  const rsiGridIndex = panelGridIndex('rsi')
+  const kdjGridIndex = panelGridIndex('kdj')
+  const moneyFlowGridIndex = panelGridIndex('moneyflow')
+  const volumeGridIndex = panelKeys.length + 1
   const xVolIndex = volumeGridIndex
   const yVolIndex = volumeGridIndex
 
@@ -394,7 +396,6 @@ function buildOption(
     })
   }
   const percentAxisShown = isValidPrice(prevClose) && yMin != null && yMax != null
-  const moneyFlowAxisIndex = subIndicators.length + 2 + (percentAxisShown ? 1 : 0)
 
   // x 轴标签: 9:30, 10:30, 11:30/13:00, 14:00, 15:00
   // 11:30(idx 120) 和 13:00(idx 121) 相邻会重叠, 合并为一个标签
@@ -408,15 +409,14 @@ function buildOption(
   const xAxisLabelFormatter = (_value: string, idx: number) => {
     return xAxisLabelMap[idx] ?? ''
   }
-  const hasDualRightAxes = percentAxisShown && showMoneyFlow
-  const moneyFlowAxisOffset = hasDualRightAxes ? 58 : 0
-  const panelRight = hasDualRightAxes ? 118 : showMoneyFlow ? 72 : 55
-  const subLayouts: Record<number, { priceBottom: string; subTops: string[]; subBottoms: string[]; volTop: string }> = {
-    1: { priceBottom: '52%', subTops: ['54%'], subBottoms: ['24%'], volTop: '80%' },
-    2: { priceBottom: '60%', subTops: ['42%', '58%'], subBottoms: ['44%', '28%'], volTop: '78%' },
-    3: { priceBottom: '66%', subTops: ['36%', '50%', '64%'], subBottoms: ['52%', '38%', '24%'], volTop: '82%' },
+  const panelRight = 55
+  const subLayouts: Record<number, { priceBottom: string; panelTops: string[]; panelBottoms: string[]; volTop: string }> = {
+    1: { priceBottom: '52%', panelTops: ['54%'], panelBottoms: ['24%'], volTop: '80%' },
+    2: { priceBottom: '60%', panelTops: ['42%', '58%'], panelBottoms: ['44%', '28%'], volTop: '78%' },
+    3: { priceBottom: '66%', panelTops: ['36%', '50%', '64%'], panelBottoms: ['52%', '38%', '24%'], volTop: '82%' },
+    4: { priceBottom: '70%', panelTops: ['32%', '45%', '58%', '71%'], panelBottoms: ['57%', '44%', '31%', '18%'], volTop: '86%' },
   }
-  const subLayout = subLayouts[subIndicators.length] ?? subLayouts[3]
+  const subLayout = subLayouts[panelKeys.length] ?? subLayouts[4]
 
   return {
     animation: false,
@@ -448,6 +448,7 @@ function buildOption(
     },
     legend: {
       show: showMoneyFlow,
+      data: ['全量净额', '主力净额'],
       left: 60,
       top: 0,
       itemWidth: 12,
@@ -457,7 +458,7 @@ function buildOption(
     grid: showSubGrid
       ? [
           { left: 60, right: panelRight, top: 24, bottom: subLayout.priceBottom },
-          ...subIndicators.map((_, i) => ({ left: 60, right: panelRight, top: subLayout.subTops[i], bottom: subLayout.subBottoms[i] })),
+          ...panelKeys.map((_, i) => ({ left: 60, right: panelRight, top: subLayout.panelTops[i], bottom: subLayout.panelBottoms[i] })),
           { left: 60, right: panelRight, top: subLayout.volTop, bottom: 20 },
         ]
       : [
@@ -500,7 +501,7 @@ function buildOption(
           lineStyle: { color: ct.grid },
         },
       },
-      ...subIndicators.map((_, i) => ({
+      ...panelKeys.map((_, i) => ({
         type: 'category' as const,
         gridIndex: i + 1,
         data: FULL_DAY_TIMES,
@@ -546,7 +547,7 @@ function buildOption(
           formatter: (v: number) => v.toFixed(2),
         },
       },
-      ...subIndicators.map((_, i) => ({
+      ...panelKeys.map((key, i) => ({
         scale: true,
         gridIndex: i + 1,
         splitNumber: 2,
@@ -558,7 +559,10 @@ function buildOption(
           color: ct.text,
           fontSize: 10,
           fontFamily: 'JetBrains Mono, monospace',
-          formatter: (v: number) => Math.abs(v) >= 10 ? v.toFixed(0) : v.toFixed(2),
+          formatter: (v: number) => {
+            if (key === 'moneyflow') return Math.abs(v) >= 10000 ? `${Math.round(v / 10000)}亿` : `${Math.round(v)}w`
+            return Math.abs(v) >= 10 ? v.toFixed(0) : v.toFixed(2)
+          },
         },
       })),
       {
@@ -601,22 +605,6 @@ function buildOption(
             if (Math.abs(pct) < 0.01) return '0.00%'
             return (pct > 0 ? '+' : '') + pct.toFixed(2) + '%'
           },
-        },
-      }] : []),
-      ...(showMoneyFlow ? [{
-        type: 'value' as const,
-        position: 'right' as const,
-        offset: moneyFlowAxisOffset,
-        gridIndex: 0,
-        scale: true,
-        splitLine: { show: false },
-        axisLine: { show: false },
-        axisTick: { show: false },
-        axisLabel: {
-          color: ct.text,
-          fontSize: 10,
-          fontFamily: 'JetBrains Mono, monospace',
-          formatter: (v: number) => Math.abs(v) >= 10000 ? `${Math.round(v / 10000)}亿` : `${Math.round(v)}w`,
         },
       }] : []),
     ],
@@ -673,17 +661,27 @@ function buildOption(
         {
           name: '全量净额',
           type: 'line' as const,
-          yAxisIndex: moneyFlowAxisIndex,
+          xAxisIndex: moneyFlowGridIndex,
+          yAxisIndex: moneyFlowGridIndex,
           data: moneyFlow.full,
           smooth: false,
           symbol: 'none',
           lineStyle: { width: 1, color: 'rgba(245,158,11,0.5)' },
           connectNulls: true,
+          markLine: {
+            symbol: 'none',
+            silent: true,
+            animation: false,
+            label: { show: false },
+            lineStyle: { color: ct.crosshair, type: 'solid' as const, width: 1.4, opacity: 0.9 },
+            data: [{ yAxis: 0 }],
+          },
         },
         {
           name: '主力净额',
           type: 'line' as const,
-          yAxisIndex: moneyFlowAxisIndex,
+          xAxisIndex: moneyFlowGridIndex,
+          yAxisIndex: moneyFlowGridIndex,
           data: moneyFlow.main,
           smooth: false,
           symbol: 'none',

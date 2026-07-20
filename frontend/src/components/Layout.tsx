@@ -9,9 +9,9 @@ import { AiAnalysisHost } from '@/components/financials/AiAnalysisHost'
 import { AiReportBubble } from '@/components/financials/AiReportBubble'
 import { StockAnalysisHost } from '@/components/stock-analysis/StockAnalysisHost'
 import { StockAnalysisBubble } from '@/components/stock-analysis/StockAnalysisBubble'
+import { ModelV4SellTicker } from '@/components/ModelV4SellTicker'
 import {
   useCapabilities,
-  useSettings,
   usePreferences,
   useQuoteStatus,
   useVersion,
@@ -27,7 +27,6 @@ import {
   History,
   FileText,
   Settings,
-  Key,
   Database,
   Loader2,
   LayoutDashboard,
@@ -35,7 +34,6 @@ import {
   TrendingUp,
   Flame,
   BarChart3,
-  Sparkles,
   Layers3,
   Landmark,
   Cable,
@@ -169,120 +167,6 @@ function SidebarIndexQuotes({ rows, items }: { rows: IndexQuote[] | undefined; i
   )
 }
 
-// ===== 档位卡片 =====
-function TierBadge({ label, hasKey }: { label: string; hasKey?: boolean }) {
-  const base = label.split(' ')[0].split('+')[0].toLowerCase()
-  const isNone = base === 'none'
-
-  const tierConfig: Record<string, {
-    desc: string
-    tagBg: React.CSSProperties
-    dotStyle: React.CSSProperties
-    labelTextStyle: React.CSSProperties
-  }> = {
-    none: {
-      desc: '未配置 Key · 仅历史日K',
-      tagBg: { background: 'rgba(113,113,122,0.15)' },
-      dotStyle: { background: '#52525b' },
-      labelTextStyle: { color: '#71717a' },
-    },
-    free: {
-      desc: '基础日K · 自选实时',
-      tagBg: { background: 'rgba(113,113,122,0.3)' },
-      dotStyle: { background: '#71717a' },
-      labelTextStyle: { color: '#a1a1aa' },
-    },
-    starter: {
-      desc: '批量同步 · 行情池',
-      tagBg: { background: 'rgba(59,130,246,0.2)' },
-      dotStyle: { background: '#3b82f6' },
-      labelTextStyle: { color: '#60a5fa' },
-    },
-    pro: {
-      desc: '分钟K · 实时行情 · 盘口',
-      tagBg: { background: 'linear-gradient(135deg, rgba(168,85,247,0.2), rgba(124,58,237,0.15))' },
-      dotStyle: { background: 'linear-gradient(135deg, #a855f7, #7c3aed)' },
-      labelTextStyle: { background: 'linear-gradient(135deg, #c084fc, #a855f7)', WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent' },
-    },
-    expert: {
-      desc: 'WebSocket · 财务数据',
-      tagBg: { background: 'linear-gradient(135deg, rgba(59,130,246,0.2), rgba(168,85,247,0.2), rgba(245,158,11,0.2))' },
-      dotStyle: { background: 'linear-gradient(135deg, #3b82f6, #a855f7, #f59e0b)' },
-      labelTextStyle: { background: 'linear-gradient(135deg, #60a5fa, #c084fc, #fbbf24)', WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent' },
-    },
-  }
-
-  const t = tierConfig[base] || tierConfig.none
-  // none 档显示英文「None」,无 label 时也显示「None」
-  const displayLabel = isNone ? 'None' : (label || 'None')
-
-  return (
-    <NavLink
-      to="/settings?tab=account"
-      className="mt-2.5 group block -mx-2.5"
-      title="API 设置"
-    >
-      <div className="relative overflow-hidden rounded-lg border border-blue-400/20 bg-gradient-to-br from-blue-500/[0.12] via-surface to-surface px-3 py-2 transition-all hover:border-blue-400/35 hover:from-blue-500/[0.16]">
-        <div className="absolute -right-5 -top-6 h-14 w-14 rounded-full bg-blue-500/10 blur-2xl" />
-        <div className="relative flex items-center gap-2">
-          <div className="flex h-6 w-6 items-center justify-center rounded-md bg-blue-400/10 text-blue-300 ring-1 ring-blue-400/20">
-            <Key className="h-3.5 w-3.5" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-1.5">
-              <span className="text-xs font-medium text-foreground">TickFlow</span>
-              <span
-                className="h-1.5 w-1.5 rounded-full"
-                style={{ ...t.dotStyle, ...(base === 'expert' ? { animation: 'pulse 2s infinite' } : {}) }}
-              />
-            </div>
-            <div className="mt-0.5 truncate text-[10px] leading-tight text-muted">
-              {isNone && !hasKey ? '配置 Key 解锁更多能力' : t.desc}
-            </div>
-          </div>
-          <span
-            className="inline-flex h-[18px] max-w-[68px] shrink-0 items-center overflow-hidden rounded px-1.5 text-[10px] font-bold font-mono leading-none"
-            style={t.tagBg}
-          >
-            <span className="truncate" style={t.labelTextStyle}>{displayLabel}</span>
-          </span>
-          <Settings className="h-3 w-3 shrink-0 text-muted group-hover:text-blue-300 transition-colors" />
-        </div>
-
-      </div>
-    </NavLink>
-  )
-}
-
-function AIConfigBadge({ configured, model }: { configured?: boolean; model?: string }) {
-  return (
-    <NavLink
-      to="/settings?tab=ai"
-      className="mt-2 group block -mx-2.5"
-      title="AI 配置"
-    >
-      <div className="relative overflow-hidden rounded-lg border border-purple-400/20 bg-gradient-to-br from-purple-500/[0.12] via-surface to-surface px-3 py-2 transition-all hover:border-purple-400/35 hover:from-purple-500/[0.16]">
-        <div className="absolute -right-5 -top-6 h-14 w-14 rounded-full bg-purple-500/10 blur-2xl" />
-        <div className="relative flex items-center gap-2">
-          <div className="flex h-6 w-6 items-center justify-center rounded-md bg-purple-400/10 text-purple-300 ring-1 ring-purple-400/20">
-            <Sparkles className="h-3.5 w-3.5" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-1.5">
-              <span className="text-xs font-medium text-foreground">AI 配置</span>
-              <span className={`h-1.5 w-1.5 rounded-full ${configured ? 'bg-bear' : 'bg-warning'}`} />
-            </div>
-            <div className="mt-0.5 truncate text-[10px] leading-tight text-muted">
-              {configured ? (model || '已接入模型') : '接入策略生成模型'}
-            </div>
-          </div>
-          <Settings className="h-3 w-3 text-muted group-hover:text-purple-300 transition-colors" />
-        </div>
-      </div>
-    </NavLink>
-  )
-}
-
 function PositionNavChildren({
   expanded,
   rows,
@@ -321,7 +205,6 @@ function PositionNavChildren({
 export function Layout() {
   // ===== 共享 hooks (替代内联 useQuery) =====
   const { data: caps } = useCapabilities()
-  const { data: settingsState } = useSettings()
   const { data: versionData } = useVersion()
   const { data: prefs } = usePreferences()
   // 数据源列表 (用于实时行情状态显示当前数据源名称)
@@ -398,6 +281,7 @@ export function Layout() {
 
   const [positionRows, setPositionRows] = useState<PositionStock[]>(() => loadPositions())
   const [activePositionSymbol, setActivePositionSymbolState] = useState(() => getActivePositionSymbol())
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const positionsExpanded = location.pathname.startsWith('/positions')
 
   useEffect(() => subscribePositionsChanged(() => {
@@ -410,6 +294,10 @@ export function Layout() {
     setActivePositionSymbolState(symbol)
     navigate(`/positions?symbol=${encodeURIComponent(symbol)}`)
   }
+
+  useEffect(() => {
+    setMobileMenuOpen(false)
+  }, [location.pathname, location.search])
 
   // 当前主数据源 (用于菜单底部状态条)
   const activeProvider = prefs?.daily_data_provider || 'tickflow'
@@ -478,9 +366,90 @@ export function Layout() {
     }
   }
 
+  const renderNavItems = () => visibleNavItems.map((item) => {
+    const { to, label, icon: Icon } = item
+    return (
+      <div key={to}>
+        <NavLink
+          to={to}
+          className={({ isActive }) =>
+            cn(
+              'flex items-center gap-3 px-3 py-2 rounded-btn text-sm transition-colors duration-150 ease-smooth',
+              isActive
+                ? 'bg-elevated text-foreground font-medium'
+                : 'text-foreground/80 hover:bg-elevated hover:text-foreground',
+            )
+          }
+        >
+          {({ isActive }) => (
+            <>
+              <Icon className="h-4 w-4 shrink-0" />
+              <span className="flex-1">{label}</span>
+              {to === '/positions' && positionRows.length > 0 && (
+                <span className="font-mono text-[10px] text-muted">{positionRows.length}</span>
+              )}
+              {(to === '/stock-analysis' || to === '/review') && (
+                <span className="inline-flex items-center rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-400 shrink-0">
+                  Beta
+                </span>
+              )}
+              {to === '/data' && isDataSyncing && (
+                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
+              )}
+              {to === '/data' && !isDataSyncing && dataSyncJustDone && (
+                <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-bull animate-pulse" />
+              )}
+              {to === '/monitor' && <MonitorBadge active={isActive} />}
+            </>
+          )}
+        </NavLink>
+        {to === '/positions' && (
+          <PositionNavChildren
+            expanded={positionsExpanded}
+            rows={positionRows}
+            activeSymbol={activePositionSymbol}
+            onSelect={handleSelectPosition}
+          />
+        )}
+      </div>
+    )
+  })
+
   return (
-    <div className="h-screen grid grid-cols-[14rem_1fr] bg-base text-foreground overflow-hidden">
-      <aside className="border-r border-border bg-surface flex flex-col h-full min-h-0 overflow-hidden">
+    <div className="h-screen grid grid-cols-1 md:grid-cols-[14rem_1fr] bg-base text-foreground overflow-hidden">
+      <header className="fixed inset-x-0 top-0 z-[60] flex h-12 items-center border-b border-border bg-surface/95 px-2 shadow-sm backdrop-blur md:hidden">
+        <button
+          type="button"
+          onClick={() => setMobileMenuOpen(v => !v)}
+          className={cn(
+            'flex h-9 min-w-12 items-center justify-center rounded-btn border px-2 font-mono text-xs font-bold tracking-[0.14em] transition-colors',
+            mobileMenuOpen
+              ? 'border-accent/40 bg-accent/15 text-accent'
+              : 'border-border bg-elevated text-foreground hover:border-accent/30',
+          )}
+          aria-label="打开菜单"
+          aria-expanded={mobileMenuOpen}
+        >
+          SE
+        </button>
+      </header>
+
+      {mobileMenuOpen && (
+        <button
+          type="button"
+          className="fixed inset-0 z-40 bg-base/30 backdrop-blur-[1px] md:hidden"
+          aria-label="关闭菜单"
+          onClick={() => setMobileMenuOpen(false)}
+        />
+      )}
+
+      <aside className={cn(
+        'border-border bg-surface flex-col min-h-0 overflow-hidden',
+        mobileMenuOpen
+          ? 'fixed left-2 top-14 z-50 flex h-[calc(100vh-4rem)] w-[min(20rem,calc(100vw-1rem))] rounded-card border shadow-2xl'
+          : 'hidden',
+        'md:static md:z-auto md:flex md:h-full md:w-auto md:rounded-none md:border-y-0 md:border-l-0 md:border-r md:shadow-none',
+      )}>
         <div className="px-5 py-5 border-b border-border shrink-0">
           {/* Brand block — 原创 logo + 等宽 wordmark */}
           <div className="flex items-center gap-2.5">
@@ -509,57 +478,7 @@ export function Layout() {
         </div>
 
         <nav className="flex-1 min-h-0 overflow-y-auto px-2 py-3 space-y-0.5">
-          {visibleNavItems.map((item) => {
-            const { to, label, icon: Icon } = item
-            return (
-              <div key={to}>
-                <NavLink
-                  to={to}
-                  className={({ isActive }) =>
-                    cn(
-                      'flex items-center gap-3 px-3 py-2 rounded-btn text-sm transition-colors duration-150 ease-smooth',
-                      isActive
-                        ? 'bg-elevated text-foreground font-medium'
-                        : 'text-foreground/80 hover:bg-elevated hover:text-foreground',
-                    )
-                  }
-                >
-                  {({ isActive }) => (
-                    <>
-                      <Icon className="h-4 w-4 shrink-0" />
-                      <span className="flex-1">{label}</span>
-                      {to === '/positions' && positionRows.length > 0 && (
-                        <span className="font-mono text-[10px] text-muted">{positionRows.length}</span>
-                      )}
-                      {/* 个股分析 Beta 标识 */}
-                      {(to === '/stock-analysis' || to === '/review') && (
-                        <span className="inline-flex items-center rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-400 shrink-0">
-                          Beta
-                        </span>
-                      )}
-                      {/* 数据同步状态: 同步中转圈, 刚完成显示绿色对勾闪烁 3 秒 */}
-                      {to === '/data' && isDataSyncing && (
-                        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
-                      )}
-                      {to === '/data' && !isDataSyncing && dataSyncJustDone && (
-                        <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-bull animate-pulse" />
-                      )}
-                      {/* 监控中心徽标: 仅非监控页且有未读时显示 */}
-                      {to === '/monitor' && <MonitorBadge active={isActive} />}
-                    </>
-                  )}
-                </NavLink>
-                {to === '/positions' && (
-                  <PositionNavChildren
-                    expanded={positionsExpanded}
-                    rows={positionRows}
-                    activeSymbol={activePositionSymbol}
-                    onSelect={handleSelectPosition}
-                  />
-                )}
-              </div>
-            )
-          })}
+          {renderNavItems()}
         </nav>
 
         {/* 数据源状态条 */}
@@ -694,16 +613,6 @@ export function Layout() {
         </div>
 
         <div className="border-t border-border px-2 py-3 shrink-0">
-          <div className="px-2.5 pb-2">
-            <TierBadge
-              label={caps?.label ?? ''}
-              hasKey={settingsState?.mode !== 'none'}
-            />
-            <AIConfigBadge
-              configured={settingsState?.ai_configured ?? settingsState?.has_ai_key}
-              model={settingsState?.ai_model}
-            />
-          </div>
           <div className="flex items-center gap-1">
             <ThemeToggle />
             <NavLink
@@ -733,8 +642,9 @@ export function Layout() {
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
-        className="h-full overflow-auto scrollbar-gutter-stable"
+        className="h-full overflow-auto scrollbar-gutter-stable pt-12 md:pt-0"
       >
+        <ModelV4SellTicker />
         <Outlet />
       </motion.main>
       <ToastContainer />
