@@ -358,6 +358,12 @@ class QuoteService:
             df = df.with_columns(pl.col("close").alias("last_price"))
         return df
 
+    def get_name_map(self, symbols: list[str] | None = None) -> dict[str, str]:
+        """Return instrument names from the repository's in-memory cache."""
+        if not self._repo:
+            return {}
+        return self._repo.get_name_map(symbols)
+
     def get_index_quotes(self, symbols: list[str] | None = None) -> pl.DataFrame:
         """返回实时指数行情缓存。不会触发 TickFlow 请求。"""
         with self._lock:

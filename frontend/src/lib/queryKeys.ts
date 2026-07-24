@@ -86,6 +86,10 @@ export const QK = {
 
   // 概念涨幅轮动矩阵
   rpsRotation:          (days: number) => ['rps-rotation', days] as const,
+
+  // 热门概念 (实时涨停 → 概念板块 treemap)
+  hotConcepts:          ['hot-concepts'] as const,
+  hotConceptsJob:       ['hot-concepts-job'] as const,
 } as const
 
 // ===== SSE 应该 invalidate 的 key 前缀列表 =====

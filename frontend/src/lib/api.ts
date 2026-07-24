@@ -1036,6 +1036,39 @@ export interface StrategyAlertEvent {
   signals?: string[]
 }
 
+// ===== Hot Concepts =====
+export interface HotConceptsResponse {
+  trade_date: string
+  unique_stocks: number
+  concept_count: number
+  treemap_pairs: number
+  source: string
+  warning: string | null
+  treemap_data: {
+    name: string
+    value: number
+    children: { name: string; code?: string; value: number }[]
+  }[]
+}
+
+export interface HotConceptsJobResponse {
+  status: 'idle' | 'running' | 'succeeded' | 'failed'
+  stage: string
+  progress: number
+  message: string
+  started_at: string | null
+  finished_at: string | null
+  duration_s: number | null
+  log: {
+    stage: string
+    progress: number
+    message: string
+    at: string
+  }[]
+  data: HotConceptsResponse | null
+  error: string | null
+}
+
 // ===== API surface =====
 export const api = {
   health: () => request<{ status: string; version: string; mode: string }>('/health'),
@@ -2188,6 +2221,26 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ strategy_id: strategyId, code }),
     }),
+
+  // ===== Hot Concepts (热门概念) =====
+  hotConceptsTreemap: (tradeDate?: string, refresh = false) => {
+    const params = new URLSearchParams()
+    if (tradeDate) params.set('trade_date', tradeDate)
+    if (refresh) params.set('refresh', 'true')
+    const qs = params.toString()
+    return request<HotConceptsResponse>(`/api/hot-concepts/treemap${qs ? `?${qs}` : ''}`)
+  },
+  hotConceptsStart: (refresh = false, tradeDate?: string) => {
+    const params = new URLSearchParams()
+    if (tradeDate) params.set('trade_date', tradeDate)
+    if (refresh) params.set('refresh', 'true')
+    const qs = params.toString()
+    return request<HotConceptsJobResponse>(`/api/hot-concepts/treemap/jobs${qs ? `?${qs}` : ''}`, {
+      method: 'POST',
+    })
+  },
+  hotConceptsStatus: () =>
+    request<HotConceptsJobResponse>('/api/hot-concepts/treemap/jobs/current'),
 }
 
 // ===== Pipeline =====
