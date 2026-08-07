@@ -2,9 +2,9 @@
 
 ## 概述
 
-在侧边栏「看板」下方新增「实况」标签页，实时展示 A 股分钟电报数据。
+在侧边栏「看板」下方新增「实况」标签页，实时展示 A 股分钟电报数据，支持 ChatTTS GPU 语音播报。
 
-数据流：
+## 架构
 
 ```
 ~/mmrs/data/daily/etf_minute_telegrams_YYYYMMDD.md (每分钟更新)
@@ -13,160 +13,101 @@
        ↓
   LiveFeed.tsx → 轮询 (交易时段 5s, 非交易时段 15s)
        ↓
-  Web Speech API → 新条目到达时语音播报
+  点击 ▶ → POST /api/live-telegram/clips?stream=true
+       ↓
+  FastAPI (3018) ──proxy──▶ ChatTTS GPU Server (8765)
+       ↓                        │ RTX 3090, 模型常驻显存
+  NDJSON 流                       │ 逐句推理 → ffmpeg → MP3
+       ↓                        │ sha256(text+seed) 缓存
+  前端队列播放                     │ 首次 ~6s/句, 缓存 <0.01s
+  片段 1/12 → 2/12 → ...
 ```
 
 ## 涉及文件
 
-### 后端
+### 后端 (tickflow-stock-panel)
 | 文件 | 说明 |
 |------|------|
-| `backend/app/api/live_telegram.py` | 解析 markdown 电报文件 → 结构化 API |
+| `backend/app/api/live_telegram.py` | 电报解析 + clips 生成 + 音频代理 |
 | `backend/app/main.py` | 注册 router |
 
-### 前端
+### 前端 (tickflow-stock-panel)
 | 文件 | 说明 |
 |------|------|
-| `src/pages/LiveFeed.tsx` | 实况页面：轮询、卡片渲染、语音播报、静音控制 |
+| `src/pages/LiveFeed.tsx` | 实况页面：轮询、流式播放、音色选择、缓存命中 |
 | `src/router.tsx` | `/live` 路由 |
 | `src/components/Layout.tsx` | 侧边栏导航项 (Radio 图标) |
+
+### GPU 服务 (mmrs)
+| 文件 | 说明 |
+|------|------|
+| `app/audio/exp/chattts_server.py` | GPU 常驻 HTTP 服务，逐句流式生成 MP3 |
+| `app/audio/exp/gen_audio_cli.py` | CLI 单次生成工具 |
+| `app/audio/exp/gen_seed.py` | 音色样本试听工具 |
 
 ## API 接口
 
 ```
-GET /api/live-telegram?limit=30&since=HH:MM
+GET  /api/live-telegram?limit=30          → 电报数据
+GET  /api/live-telegram/seeds              → 可用音色列表
+POST /api/live-telegram/clips?text=...&seed=2&stream=true  → NDJSON 流式片段
+GET  /api/live-telegram/audio/{name}       → MP3 文件 (代理 GPU 服务)
 ```
 
-响应：
+### clips 响应 (stream=true, NDJSON)
 ```json
-{
-  "sections": [
-    {
-      "time": "11:24",
-      "title": "🧩 11:24 · 概念板块分钟汇总",
-      "items": [
-        {"emoji": "💼", "label": "股票", "text": "茅指数概念：动量扩张14起..."},
-        ...
-      ]
-    }
-  ],
-  "file": "/home/dennis/mmrs/data/daily/etf_minute_telegrams_20260807.md",
-  "updated_at": "2026-08-07T11:31:59",
-  "total": 302
-}
+{"url": "/api/live-telegram/audio/clip_xxx_0.mp3", "duration": 2.65, "text": "涨停62只", "mp3_kb": 21, "index": 0, "total": 10, "gen_time": 4.7}
+{"url": "/api/live-telegram/audio/clip_xxx_1.mp3", "duration": 3.99, "text": "跌停5只", "mp3_kb": 31, "index": 1, "total": 10, "gen_time": 0.8}
+...
+```
+
+### seeds 响应
+```json
+{"seeds": [
+  {"id": 2,    "label": "沉稳男声", "engine": "chattts"},
+  {"id": 6616, "label": "年轻女声", "engine": "chattts"},
+  {"id": 1111, "label": "磁性女声", "engine": "chattts"}
+]}
+```
+
+## 语音引擎
+
+| 引擎 | 音色 | 延迟 | 说明 |
+|------|------|------|------|
+| ChatTTS · 沉稳男声 | seed=2 | 首句 ~5s, 缓存 <0.01s | GPU 推理，MP3 64kbps |
+| ChatTTS · 年轻女声 | seed=6616 | 同上 | |
+| ChatTTS · 磁性女声 | seed=1111 | 同上 | |
+| Web Speech | 浏览器默认 | 即时 | 无须后端，质量较低 |
+
+## 启动命令
+
+```bash
+# 1. GPU 常驻服务（必须先启动）
+cd ~/mmrs/app/audio/exp
+python3 chattts_server.py --port 8765 --device cuda &
+
+# 2. 后端
+cd ~/mmrs/re_3/github/tickflow-stock-panel/backend
+uv run uvicorn app.main:app --host 0.0.0.0 --port 3018
+
+# 3. 打开 http://localhost:3018/live
 ```
 
 ## 功能特性
 
 - **实时轮询**：交易时段 5s，非交易时段 15s
-- **语音播报**：Web Speech API (zh-CN)，新条目到达自动朗读
-- **静音切换**：状态持久化到 localStorage
-- **直播指示**：交易时段绿色脉冲徽标，非交易时段"休市"
-- **彩色标签**：涨停红/跌停绿/热点金/相似度蓝/操作蓝
-- **动画**：新卡片从顶部滑入 + 蓝色光晕 + NEW 标记
-- **暗色主题**：与面板整体设计语言一致
-
----
-
-# Handoff — 热门概念 (Hot Concepts) 功能
-
-## 概述
-
-在侧边栏「看板」下方新增「热门」标签页，展示当日涨停股票的**概念板块分布 Treemap**。
-
-数据流：
-
-```
-盘中：Redis (192.168.50.68:6379 DB15) → tdx:trans:* 逐笔成交
-盘后/无数据：~/historical_transaction/YYYY/MM/DD.parquet 历史逐笔成交
-       ↓
-  最新成交价 × tushare 昨收价(pre_close) → 涨跌幅
-       ↓
-  涨停检测 (pct_chg ≥ limit_pct × 0.98)
-       ↓
-  同花顺概念映射 (data/ths_members_N.csv, 3.7MB)
-       ↓
-  /api/hot-concepts/treemap → ECharts treemap
-```
-
-## 涉及文件
-
-### 后端
-| 文件 | 说明 |
-|------|------|
-| `backend/app/api/hot_concepts.py` | 核心：Redis/Parquet 双数据源 → 涨停检测 → 概念映射 → API |
-| `backend/app/main.py` (L14, L284) | 注册 router |
-
-### 前端
-| 文件 | 说明 |
-|------|------|
-| `src/pages/HotConcepts.tsx` | Treemap 可视化页面，ECharts 渲染，60s 自动刷新 |
-| `src/lib/api.ts` | `HotConceptsResponse` 类型 + `api.hotConceptsTreemap()` |
-| `src/lib/queryKeys.ts` | `QK.hotConcepts` 查询 key |
-| `src/router.tsx` | `/hot-concepts` 路由 |
-| `src/components/Layout.tsx` | 侧边栏导航项 |
-
-## API 接口
-
-```
-GET /api/hot-concepts/treemap
-```
-
-参数：
-- `trade_date` (可选): YYYYMMDD，如 `20260723`。不传则自动找最近有 parquet 的交易日
-- `refresh` (可选): `true` 跳过缓存
-
-响应：
-```json
-{
-  "trade_date": "20260723",
-  "unique_stocks": 127,
-  "concept_count": 263,
-  "treemap_pairs": 1092,
-  "source": "parquet",
-  "warning": null,
-  "treemap_data": [
-    {
-      "name": "储能",
-      "value": 32,
-      "children": [
-        {"name": "中能电气", "value": 1},
-        ...
-      ]
-    },
-    ...
-  ]
-}
-```
-
-字段说明：
-- `unique_stocks`: 唯一涨停股票数（同一股票属于多个概念只计一次）
-- `treemap_pairs`: 概念-股票对总数（有重复，仅用于 treemap 渲染）
-- `source`: `"redis"` | `"parquet"` | `"none"`
-
-## 数据源优先级
-
-1. **Redis** (`tdx:trans:*` keys, DB15): 盘中实时，限 3000 只采样，4s 超时
-2. **Parquet** (`~/historical_transaction/`): 历史逐笔成交，自动找最近可用日期
-
-Redis 不可用/超时时自动回退 parquet，对前端透明。
-
-## 涨停检测逻辑
-
-- 10% 板: 主板 (0/1/5/6/7 开头)，阈值 ≥ 9.8%
-- 20% 板: 创业板 (3 开头) + 科创板 (688 开头)，阈值 ≥ 19.6%
-- 30% 板: 北交所 (8/9 开头)，阈值 ≥ 29.4%
-- ST: 5% 限制
+- **流式语音**：逐句生成 + NDJSON 流，首句到达即播放
+- **内容缓存**：sha256(text+seed) 去重，重复内容秒级响应
+- **MP3 压缩**：64kbps mono，6:1 压缩比（50s 音频仅 400KB）
+- **独立播放**：每分钟卡片右上角 ▶ 按钮
+- **音色选择**：下拉菜单切换 ChatTTS 种子 / Web Speech
+- **播放进度**：按钮旁显示 "3/12" 片段计数
+- **暗色主题**：与面板设计语言一致
+- **彩色标签**：涨停红/跌停绿/热点金/相似度蓝
 
 ## 缓存
 
-- 后端 15 分钟内存缓存（`_cached_treemap_data`）
-- 前端 React Query 30s staleTime + 60s refetchInterval
-- 第一个请求较慢（~4s parquet + tushare），后续命中缓存
-
-## 已知限制
-
-1. **Parquet 价格精度**：北交所 (920) 股票的 parquet 价格比实际低 10 倍，已通过 tushare 日线交叉验证排除假阳性
-2. **概念数据**：使用同花顺静态快照 (`ths_members_N.csv`)，不包含历史成员变更
-3. **Redis 全量读取不可行**：22000+ 只股票 × ~500KB/只 ≈ 11GB，盘中仅采样
-4. **首次请求慢**：parquet 14M 行读取 + tushare API ≈ 4-5s，后续命中缓存
+- 目录：`/tmp/chattts_audio/cache/<hash>/manifest.json`
+- Key：`sha256(text + seed)[:16]`
+- 重启 GPU 服务后缓存仍然有效
+- 清理：`rm -rf /tmp/chattts_audio/cache/`
