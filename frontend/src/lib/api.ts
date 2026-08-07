@@ -287,6 +287,9 @@ export interface WatchlistEntry {
   added_at: string
   note?: string
   name?: string | null
+  source?: string
+  sources?: string[]
+  updated_at?: string
 }
 
 export interface Quote {
@@ -697,6 +700,7 @@ export interface ModelV4Sr013RealtimeRow {
   sell_time?: string
   sell_price?: number | null
   sell_rule?: string
+  sell_rule_description?: string
   gross_return?: number | null
   actual_return?: number | null
   open_price?: number | null
@@ -709,6 +713,7 @@ export interface ModelV4Sr013RealtimeRow {
   buy_price_source?: string
   sell_reason?: string
   sell_reason_label?: string
+  sell_reason_description?: string
   observed_mfe?: number | null
   giveback_from_mfe?: number | null
   status?: 'sell_triggered' | 'sell_triggered_fill_pending' | 'holding' | 'waiting_for_reference_price' | 'waiting_for_transaction_data' | string
@@ -716,6 +721,7 @@ export interface ModelV4Sr013RealtimeRow {
   last_transaction_time?: string
   data_source?: string
   parameters?: Record<string, any>
+  fee_rate_per_side?: number
 }
 
 export interface ModelV4Sr013RealtimeOutput {
@@ -728,6 +734,8 @@ export interface ModelV4Sr013RealtimeOutput {
   rule_description?: string
   symbols_source: string
   quote_request: string
+  redis_request?: string
+  fee_rate_per_side?: number
   rows: ModelV4Sr013RealtimeRow[]
   count: number
   errors?: string[]
@@ -1485,6 +1493,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ symbols, source }),
     }),
+  activeStocksSyncSource: (symbols: string[], source: string) =>
+    request<{ symbols: WatchlistEntry[]; active_symbols_file: string }>('/api/active-stocks/sync', {
+      method: 'PUT',
+      body: JSON.stringify({ symbols, source }),
+    }),
   activeStockRemove: (symbol: string) =>
     request<{ symbols: WatchlistEntry[]; active_symbols_file: string }>(
       `/api/active-stocks/${encodeURIComponent(symbol)}`,
@@ -1550,9 +1563,10 @@ export const api = {
     return request<Sr004RealtimeExitResult>(`/api/backtest/sr004-realtime-exit?${params.toString()}`)
   },
 
-  modelV4Sr013Realtime: (tradeDate?: string) => {
+  modelV4Sr013Realtime: (tradeDate?: string, symbols?: string[]) => {
     const params = new URLSearchParams()
     if (tradeDate) params.set('trade_date', tradeDate)
+    if (symbols !== undefined) params.set('symbols', symbols.join(','))
     const qs = params.toString()
     return request<ModelV4Sr013RealtimeOutput>(
       `/api/model-v4/sr013-realtime/positions${qs ? `?${qs}` : ''}`,

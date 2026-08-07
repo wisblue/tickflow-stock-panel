@@ -18,6 +18,7 @@ import { Positions } from './pages/Positions'
 import { Review } from './pages/Review'
 import { LimitUpLadder } from './pages/LimitUpLadder'
 import { HotConcepts } from './pages/HotConcepts'
+import LiveFeed from './pages/LiveFeed'
 import { Branding } from './pages/Branding'
 import { Settings } from './pages/Settings'
 import { Indices } from './pages/Indices'
@@ -82,6 +83,7 @@ export const router = createBrowserRouter([
       { path: 'trading', element: <Trading /> },
       { path: 'limit-ladder', element: <LimitUpLadder /> },
       { path: 'hot-concepts', element: <HotConcepts /> },
+      { path: 'live', element: <LiveFeed /> },
       { path: 'indices', element: <Indices /> },
       { path: 'branding', element: <Branding /> },
       { path: 'settings', element: <Settings /> },

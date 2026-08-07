@@ -1,9 +1,10 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { BellRing, ChevronRight, Clock3, Loader2, X } from 'lucide-react'
 import { api, type ModelV4Sr013RealtimeRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
+import { loadPositions, subscribePositionsChanged } from '@/lib/positions'
 
 function pct(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(Number(value))) return '—'
@@ -29,6 +30,14 @@ function sellSortKey(row: ModelV4Sr013RealtimeRow): string {
   if (row.sell_time) return `0-${row.sell_time}-${row.stock_code}`
   if (row.status === 'sell_triggered_fill_pending') return `1-${row.signal_time || '99:99:99'}-${row.stock_code}`
   return `2-${row.stock_code}`
+}
+
+function hasSellSignal(row: ModelV4Sr013RealtimeRow): boolean {
+  return row.status === 'sell_triggered' || row.status === 'sell_triggered_fill_pending'
+}
+
+function loadPositionSymbols(): string[] {
+  return [...new Set(loadPositions().map((row) => row.symbol).filter(Boolean))]
 }
 
 function StatusLabel({ row }: { row: ModelV4Sr013RealtimeRow }) {
@@ -63,9 +72,23 @@ function TickerItem({ row }: { row: ModelV4Sr013RealtimeRow }) {
 
 export function ModelV4SellTicker() {
   const [open, setOpen] = useState(false)
+  const [positionSymbols, setPositionSymbols] = useState<string[]>(loadPositionSymbols)
+  const positionKey = positionSymbols.join(',')
+
+  useEffect(() => subscribePositionsChanged(() => {
+    const next = loadPositionSymbols()
+    setPositionSymbols((current) => current.join(',') === next.join(',') ? current : next)
+  }), [])
+
+  useEffect(() => {
+    api.activeStocksSyncSource(positionSymbols, 'positions').catch((error) => {
+      console.warn('sync global position monitor symbols failed', error)
+    })
+  }, [positionSymbols])
+
   const query = useQuery({
-    queryKey: QK.modelV4Sr013Realtime,
-    queryFn: () => api.modelV4Sr013Realtime(),
+    queryKey: [...QK.modelV4Sr013Realtime, positionKey],
+    queryFn: () => api.modelV4Sr013Realtime(undefined, positionSymbols),
     staleTime: 0,
     retry: false,
     refetchInterval: 60_000,
@@ -73,12 +96,23 @@ export function ModelV4SellTicker() {
   })
   const rows = query.data?.rows ?? []
   const sortedRows = useMemo(
-    () => [...rows].sort((left, right) => sellSortKey(left).localeCompare(sellSortKey(right))),
+    () => {
+      const unique = new Map<string, ModelV4Sr013RealtimeRow>()
+      for (const row of [...rows].sort((left, right) => sellSortKey(left).localeCompare(sellSortKey(right)))) {
+        if (!unique.has(row.stock_code)) unique.set(row.stock_code, row)
+      }
+      return [...unique.values()]
+    },
     [rows],
   )
-  const tickerRows = useMemo(
-    () => (sortedRows.length > 0 ? [...sortedRows, ...sortedRows] : []),
+  const signalRows = useMemo(
+    () => sortedRows.filter(hasSellSignal),
     [sortedRows],
+  )
+  const shouldScroll = signalRows.length > 1
+  const tickerRows = useMemo(
+    () => (shouldScroll ? [...signalRows, ...signalRows] : signalRows),
+    [shouldScroll, signalRows],
   )
 
   return (
@@ -90,25 +124,29 @@ export function ModelV4SellTicker() {
         title="打开今日持仓卖出明细"
         aria-label="打开今日持仓卖出明细"
       >
-        <span className="flex h-full shrink-0 items-center gap-1.5 border-r border-border bg-elevated/80 px-3 text-[10px] font-semibold tracking-wide text-accent">
+        <span className="relative z-10 flex h-full shrink-0 items-center gap-1.5 border-r border-border bg-elevated/45 px-3 text-[10px] font-semibold tracking-wide text-accent backdrop-blur-sm">
           <BellRing className="h-3.5 w-3.5" />
           今日持仓卖出监控
         </span>
-        {query.isLoading ? (
-          <span className="flex items-center gap-1.5 px-3 text-[11px] text-muted">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            正在读取持仓
-          </span>
-        ) : query.isError ? (
-          <span className="px-3 text-[11px] text-warning">实时卖出监控暂不可用</span>
-        ) : rows.length === 0 ? (
-          <span className="px-3 text-[11px] text-muted">暂无 source=positions 持仓</span>
-        ) : (
-          <span className="model-v4-ticker-track flex min-w-max items-center">
-            {tickerRows.map((row, index) => <TickerItem key={`${row.stock_code}-${index}`} row={row} />)}
-          </span>
-        )}
-        <ChevronRight className="ml-auto mr-3 h-4 w-4 shrink-0 text-muted" />
+        <span className="flex h-full min-w-0 flex-1 items-center overflow-hidden">
+          {query.isLoading ? (
+            <span className="flex items-center gap-1.5 px-3 text-[11px] text-muted">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              正在读取持仓
+            </span>
+          ) : query.isError ? (
+            <span className="px-3 text-[11px] text-warning">实时卖出监控暂不可用</span>
+          ) : rows.length === 0 ? (
+            <span className="px-3 text-[11px] text-muted">暂无持仓</span>
+          ) : signalRows.length === 0 ? (
+            <span className="px-3 text-[11px] text-muted">暂无卖出信号</span>
+          ) : (
+            <span className={cn('flex min-w-max items-center', shouldScroll && 'model-v4-ticker-track')}>
+              {tickerRows.map((row, index) => <TickerItem key={`${row.stock_code}-${index}`} row={row} />)}
+            </span>
+          )}
+        </span>
+        <ChevronRight className="mx-3 h-4 w-4 shrink-0 text-muted" />
       </button>
 
       {open && (
@@ -117,7 +155,7 @@ export function ModelV4SellTicker() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="model-v4-sell-title"
-            className="flex max-h-[calc(100vh-1.5rem)] w-full max-w-5xl flex-col overflow-hidden rounded-card border border-border bg-surface shadow-2xl"
+            className="flex max-h-[calc(100dvh-4.25rem)] w-full max-w-5xl flex-col overflow-hidden rounded-card border border-border bg-surface shadow-2xl md:max-h-[calc(100dvh-1.5rem)]"
           >
             <div className="flex items-start justify-between gap-4 border-b border-border px-4 py-3">
               <div>
@@ -145,7 +183,7 @@ export function ModelV4SellTicker() {
               </button>
             </div>
             <div className="min-h-0 overflow-auto">
-              <table className="w-full min-w-[1040px] text-xs">
+              <table className="w-full min-w-[1240px] text-xs">
                 <thead className="sticky top-0 z-10 bg-elevated text-[10px] text-muted">
                   <tr>
                     <th className="px-3 py-2 text-left font-medium">股票代码</th>
@@ -170,7 +208,12 @@ export function ModelV4SellTicker() {
                       <td className="px-3 py-2 font-mono text-secondary">{time(row.sell_time)}</td>
                       <td className="px-3 py-2 text-right font-mono text-foreground">{price(row.sell_price)}</td>
                       <td className="px-3 py-2 text-right font-mono text-foreground">{price(row.t_close_price)}</td>
-                      <td className="max-w-64 truncate px-3 py-2 text-secondary" title={row.sell_rule || ''}>{row.sell_reason_label || row.sell_rule || '—'}</td>
+                      <td className="max-w-80 px-3 py-2 text-secondary">
+                        <div className="font-medium text-foreground/90">{row.sell_reason_label || row.sell_rule || '—'}</div>
+                        <div className="mt-0.5 whitespace-normal text-[10px] leading-4 text-muted">
+                          {row.sell_reason_description || row.sell_rule_description || '—'}
+                        </div>
+                      </td>
                       <td className={cn('px-3 py-2 text-right font-mono', returnClass(row.gross_return))}>{pct(row.gross_return)}</td>
                       <td className={cn('px-3 py-2 text-right font-mono', returnClass(row.actual_return))}>{pct(row.actual_return)}</td>
                       <td className="px-3 py-2 text-right font-mono text-foreground">{price(row.latest_price)}</td>
@@ -182,7 +225,7 @@ export function ModelV4SellTicker() {
               {rows.length === 0 && <div className="px-4 py-8 text-center text-xs text-muted">今日暂无持仓数据</div>}
             </div>
             <div className="flex items-center justify-between border-t border-border px-4 py-2 text-[10px] text-muted">
-              <span>ACT5信号与收益统一使用T日收盘价；毛收益/实际收益 =（卖出价或最新价）÷ T日收盘价 − 1</span>
+              <span>ACT5信号与收益统一使用T日收盘价；实际收益按买卖双边各0.05%费用扣减</span>
               <span>{query.data?.checked_at ? `更新 ${query.data.checked_at.slice(11, 19)}` : '—'}</span>
             </div>
           </div>

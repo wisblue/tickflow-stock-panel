@@ -45,6 +45,7 @@ import {
   Sun,
   Moon,
   X,
+  Radio,
 } from 'lucide-react'
 import { Logo } from './Logo'
 import { api, type IndexQuote } from '@/lib/api'
@@ -74,6 +75,7 @@ type CoreIndex = (typeof CORE_INDEXES)[number]
 
 const nav = [
   { to: '/',                label: '看板',     icon: LayoutDashboard },
+  { to: '/live',       label: '实况',     icon: Radio },
   { to: '/hot-concepts', label: '热门', icon: TrendingUp },
   { to: '/watchlist',  label: '自选',   icon: Star },
   { to: '/positions', label: '持仓', icon: WalletCards },

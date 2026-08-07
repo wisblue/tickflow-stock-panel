@@ -93,8 +93,7 @@ export function Positions() {
   }, [])
 
   useEffect(() => {
-    if (positions.length === 0) return
-    api.activeStocksBatchAdd(positions.map((row) => row.symbol), 'positions').catch((error) => {
+    api.activeStocksSyncSource(positions.map((row) => row.symbol), 'positions').catch((error) => {
       console.warn('sync positions active stocks failed', error)
     })
   }, [positions])

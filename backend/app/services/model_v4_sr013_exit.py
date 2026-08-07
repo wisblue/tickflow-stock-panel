@@ -28,6 +28,10 @@ logger = logging.getLogger(__name__)
 
 TZ_SHANGHAI = timezone(timedelta(hours=8))
 TX_ROOT = Path("/home/dennis/historical_transaction")
+S152_PIPELINE_ROOT = Path(
+    "/home/dennis/re_3/codex/prediction/Models/models-v4/"
+    "t1445_t1_s150_rebuild_v1/runs/s152_live_pipeline"
+)
 RULE_NAME = "V4_SR013_ACT5_TCLOSE_GB2_CATA1100_FIRST1445"
 RULE_FAMILY = "sr013_act5_tclose_profit_trail_plus_catastrophe_guard"
 RULE_DESCRIPTION = (
@@ -49,6 +53,17 @@ FALLBACK_FILL_HHMM = 1445
 FEE_RATE_PER_SIDE = 0.0005
 MIN_HHMM = 925
 MAX_HHMM = 1500
+RULE_REASON_DESCRIPTIONS = {
+    "sr013_act5_profit_trail": (
+        "10:00起，盘中最高涨幅达到5%后，从峰值回撤至少2个百分点，"
+        "按下一可见分钟首笔成交卖出。"
+    ),
+    "confirmed_catastrophe_guard": (
+        "11:00起，最高涨幅低于3%、当前跌幅达到4%且价格不高于当时VWAP，"
+        "按下一可见分钟首笔成交卖出。"
+    ),
+    "forced_first_fill_1445": "此前未触发时，按14:45分钟内首笔成交卖出。",
+}
 
 
 def _norm_symbol(value: Any) -> str:
@@ -82,7 +97,6 @@ def _tx_path(trade_date: str) -> Path:
     return TX_ROOT / trade_date[:4] / trade_date[4:6] / f"{trade_date[6:8]}.parquet"
 
 
-@lru_cache(maxsize=1)
 def _transaction_dates() -> tuple[str, ...]:
     if not TX_ROOT.exists():
         return ()
@@ -97,6 +111,14 @@ def _transaction_dates() -> tuple[str, ...]:
 
 
 def _previous_date(trade_date: str) -> str:
+    state_path = S152_PIPELINE_ROOT / trade_date / "pipeline_state.json"
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        basis_date = _norm_date(state.get("basis_date"))
+        if _norm_date(state.get("trade_date")) == trade_date and basis_date < trade_date:
+            return basis_date
+    except (OSError, json.JSONDecodeError, TypeError):
+        pass
     prior = [date for date in _transaction_dates() if date < trade_date]
     return prior[-1] if prior else ""
 
@@ -112,6 +134,7 @@ def _load_historical_stock_day(trade_date: str, symbol: str) -> pd.DataFrame:
         if not code_col or "time_hhmm" not in available or "price" not in available:
             return pd.DataFrame()
         wanted = [
+            "trade_date",
             code_col,
             "time_hhmm",
             "time_hhmmss",
@@ -125,9 +148,18 @@ def _load_historical_stock_day(trade_date: str, symbol: str) -> pd.DataFrame:
         frame = (
             pl.scan_parquet(path)
             .select(wanted)
-            .with_columns(normalized_code.alias("_normalized_code"))
-            .filter(pl.col("_normalized_code") == symbol)
-            .drop("_normalized_code")
+            .with_columns(
+                normalized_code.alias("_normalized_code"),
+                pl.col("trade_date")
+                .cast(pl.Utf8)
+                .str.replace_all("-", "")
+                .alias("_normalized_date"),
+            )
+            .filter(
+                (pl.col("_normalized_code") == symbol)
+                & (pl.col("_normalized_date") == trade_date)
+            )
+            .drop(["_normalized_code", "_normalized_date"])
             .collect()
         )
         if frame.is_empty():
@@ -167,6 +199,111 @@ def _load_historical_stock_day(trade_date: str, symbol: str) -> pd.DataFrame:
     ).reset_index(drop=True)
 
 
+@lru_cache(maxsize=32)
+def _load_historical_close_map_cached(
+    path_text: str,
+    trade_date: str,
+    symbols: tuple[str, ...],
+    file_size: int,
+    file_mtime_ns: int,
+) -> dict[str, dict[str, Any]]:
+    del file_size, file_mtime_ns  # Cache-key freshness inputs.
+    path = Path(path_text)
+    try:
+        available = set(pl.read_parquet_schema(path).keys())
+        code_col = (
+            "stock_code"
+            if "stock_code" in available
+            else "symbol"
+            if "symbol" in available
+            else ""
+        )
+        required = {"trade_date", "time_hhmm", "price"}
+        if not code_col or not required.issubset(available):
+            return {}
+        normalized_code = (
+            pl.col(code_col).cast(pl.Utf8).str.extract(r"(\d+)", 1).str.zfill(6)
+        )
+        normalized_date = (
+            pl.col("trade_date").cast(pl.Utf8).str.replace_all("-", "")
+        )
+        hhmmss = (
+            pl.col("time_hhmmss").cast(pl.Int64, strict=False)
+            if "time_hhmmss" in available
+            else pl.col("time_hhmm").cast(pl.Int64, strict=False) * 100
+        )
+        chrono = (
+            pl.col("chrono_row_in_symbol").cast(pl.Int64, strict=False)
+            if "chrono_row_in_symbol" in available
+            else pl.lit(0, dtype=pl.Int64)
+        )
+        frame = (
+            pl.scan_parquet(path)
+            .select(
+                normalized_code.alias("stock_code"),
+                normalized_date.alias("trade_date"),
+                pl.col("time_hhmm").cast(pl.Int64, strict=False).alias("time_hhmm"),
+                hhmmss.alias("time_hhmmss"),
+                pl.col("price").cast(pl.Float64, strict=False).alias("price"),
+                chrono.alias("chrono_row_in_symbol"),
+            )
+            .filter(
+                pl.col("stock_code").is_in(list(symbols))
+                & (pl.col("trade_date") == trade_date)
+                & pl.col("time_hhmm").is_between(930, 1500, closed="both")
+                & pl.col("price").is_not_null()
+                & (pl.col("price") > 0)
+            )
+            .sort(
+                [
+                    "stock_code",
+                    "time_hhmm",
+                    "time_hhmmss",
+                    "chrono_row_in_symbol",
+                ]
+            )
+            .group_by("stock_code", maintain_order=True)
+            .agg(
+                pl.col("price").last(),
+                pl.col("time_hhmm").last(),
+                pl.col("time_hhmmss").last(),
+            )
+            .collect()
+        )
+    except Exception as exc:
+        logger.warning("SR013 historical close batch read failed for %s: %s", trade_date, exc)
+        return {}
+
+    return {
+        str(row["stock_code"]): {
+            "price": float(row["price"]),
+            "source": "historical_transaction_last_fill_le_1500",
+            "meta": {
+                "price_time_hhmm": int(row["time_hhmm"]),
+                "price_time_hhmmss": int(row["time_hhmmss"]),
+                "transaction_path": str(path),
+            },
+        }
+        for row in frame.iter_rows(named=True)
+    }
+
+
+def _load_historical_close_map(
+    trade_date: str, symbols: list[str]
+) -> dict[str, dict[str, Any]]:
+    normalized_symbols = tuple(sorted({_norm_symbol(symbol) for symbol in symbols if _norm_symbol(symbol)}))
+    if not trade_date or not normalized_symbols:
+        return {}
+    path = _tx_path(trade_date)
+    try:
+        stat = path.stat()
+    except OSError:
+        return {}
+    return _load_historical_close_map_cached(
+        str(path), trade_date, normalized_symbols, stat.st_size, stat.st_mtime_ns
+    )
+
+
 def _redis_client() -> redis.Redis:
     host, _, port_text = str(settings.tdx_redis_addr or "localhost:6379").partition(":")
     return redis.Redis(
@@ -190,6 +327,10 @@ def _redis_rows(client: redis.Redis, trade_date: str, symbol: str) -> pd.DataFra
     except Exception as exc:
         logger.warning("SR013 Redis read failed for %s: %s", symbol, exc)
         return pd.DataFrame()
+    return _parse_redis_rows(raw, trade_date, symbol)
+
+
+def _parse_redis_rows(raw: Any, trade_date: str, symbol: str) -> pd.DataFrame:
     if not raw:
         return pd.DataFrame()
 
@@ -212,6 +353,9 @@ def _redis_rows(client: redis.Redis, trade_date: str, symbol: str) -> pd.DataFra
                     "time_hhmmss": dt.hour * 10000 + dt.minute * 100 + dt.second,
                     "price": price,
                     "vol": max(volume, 0.0),
+                    "trade_count": int(_finite(obj.get("num")) or 0),
+                    "bs_flag": int(_finite(obj.get("buy_or_sell")) or 0),
+                    "action": str(obj.get("action") or ""),
                     "transaction_time": timestamp,
                     "source_row_order": source_row_order,
                     "chrono_row_in_symbol": source_row_order,
@@ -224,11 +368,49 @@ def _redis_rows(client: redis.Redis, trade_date: str, symbol: str) -> pd.DataFra
     frame = pd.DataFrame(rows)
     frame = frame[frame["time_hhmm"].between(MIN_HHMM, MAX_HHMM)].copy()
     frame = frame.drop_duplicates(
-        subset=["transaction_time", "time_hhmmss", "price", "vol"], keep="first"
+        subset=[
+            "transaction_time",
+            "time_hhmmss",
+            "price",
+            "vol",
+            "trade_count",
+            "bs_flag",
+            "action",
+        ],
+        keep="first",
     )
     return frame.sort_values(
         ["time_hhmm", "time_hhmmss", "source_row_order"], kind="mergesort"
     ).reset_index(drop=True)
+
+
+def _redis_rows_batch(
+    client: redis.Redis, trade_date: str, symbols: list[str]
+) -> dict[str, pd.DataFrame]:
+    if not symbols:
+        return {}
+    prefix = settings.tdx_redis_key_prefix or "tdx:trans"
+    dated_keys = [f"{prefix}:{trade_date}:{symbol}" for symbol in symbols]
+    plain_keys = [f"{prefix}:{symbol}" for symbol in symbols]
+    try:
+        pipe = client.pipeline(transaction=False)
+        for key in dated_keys:
+            pipe.exists(key)
+        dated_exists = [bool(value) for value in pipe.execute()]
+        selected_keys = [
+            dated if exists else plain
+            for dated, plain, exists in zip(
+                dated_keys, plain_keys, dated_exists, strict=False
+            )
+        ]
+        payloads = client.mget(selected_keys)
+    except Exception as exc:
+        logger.warning("SR013 Redis batch read failed for %d symbols: %s", len(symbols), exc)
+        return {symbol: pd.DataFrame() for symbol in symbols}
+    return {
+        symbol: _parse_redis_rows(raw, trade_date, symbol)
+        for symbol, raw in zip(symbols, payloads, strict=False)
+    }
 
 
 def _quote_map(request: Any, symbols: list[str]) -> dict[str, dict[str, Any]]:
@@ -248,34 +430,51 @@ def _quote_map(request: Any, symbols: list[str]) -> dict[str, dict[str, Any]]:
 
 
 def _t_close_reference(
-    *, trade_date: str, symbol: str, quote: dict[str, Any]
+    *,
+    trade_date: str,
+    symbol: str,
+    quote: dict[str, Any],
+    entry_date: str | None = None,
+    historical_reference: dict[str, Any] | None = None,
 ) -> tuple[float | None, str, str, dict[str, Any]]:
-    entry_date = _previous_date(trade_date)
+    resolved_entry_date = (
+        _norm_date(entry_date) if entry_date is not None else _previous_date(trade_date)
+    )
     today = datetime.now(TZ_SHANGHAI).strftime("%Y%m%d")
     if trade_date == today:
         for key in ("prev_close", "pre_close", "previous_close", "last_close"):
             value = _finite(quote.get(key))
             if value is not None and value > 0:
-                return value, f"tickflow_quote.{key}", entry_date, {"price_field": key}
+                return value, f"tickflow_quote.{key}", resolved_entry_date, {"price_field": key}
 
-    if not entry_date:
+    if not resolved_entry_date:
         return None, "", "", {}
-    day = _load_historical_stock_day(entry_date, symbol)
+    if historical_reference is not None:
+        value = _finite(historical_reference.get("price"))
+        if value is None or value <= 0:
+            return None, "", resolved_entry_date, {}
+        return (
+            value,
+            str(historical_reference.get("source") or "historical_transaction_last_fill_le_1500"),
+            resolved_entry_date,
+            dict(historical_reference.get("meta") or {}),
+        )
+    day = _load_historical_stock_day(resolved_entry_date, symbol)
     regular = day[day["time_hhmm"].between(930, 1500)] if not day.empty else day
     if regular.empty:
-        return None, "", entry_date, {}
+        return None, "", resolved_entry_date, {}
     point = regular.iloc[-1]
     value = _finite(point["price"])
     if value is None or value <= 0:
-        return None, "", entry_date, {}
+        return None, "", resolved_entry_date, {}
     return (
         value,
         "historical_transaction_last_fill_le_1500",
-        entry_date,
+        resolved_entry_date,
         {
             "price_time_hhmm": int(point["time_hhmm"]),
             "price_time_hhmmss": int(point["time_hhmmss"]),
-            "transaction_path": str(_tx_path(entry_date)),
+            "transaction_path": str(_tx_path(resolved_entry_date)),
         },
     )
 
@@ -448,6 +647,7 @@ def _evaluate_rule(
         "signal_time_hhmmss": signal_hhmmss,
         "signal_time": _format_hhmmss(signal_hhmmss),
         "sell_reason_label": reason_labels[chosen_reason],
+        "sell_reason_description": RULE_REASON_DESCRIPTIONS[chosen_reason],
     }
     if chosen is not None:
         event.update(
@@ -464,6 +664,7 @@ def _evaluate_rule(
             "status": "sell_triggered_fill_pending",
             "sell_reason": chosen_reason,
             "sell_reason_label": reason_labels[chosen_reason],
+            "sell_reason_description": RULE_REASON_DESCRIPTIONS[chosen_reason],
             "signal_time_hhmm": signal_hhmm,
             "signal_time_hhmmss": signal_hhmmss,
             "signal_time": _format_hhmmss(signal_hhmmss),
@@ -487,6 +688,7 @@ def _evaluate_rule(
         "status": "sell_triggered",
         "sell_reason": chosen_reason,
         "sell_reason_label": reason_labels[chosen_reason],
+        "sell_reason_description": RULE_REASON_DESCRIPTIONS[chosen_reason],
         "signal_time_hhmm": signal_hhmm,
         "signal_time_hhmmss": signal_hhmmss,
         "signal_time": _format_hhmmss(signal_hhmmss),
@@ -513,17 +715,24 @@ def _evaluate_one(
     quote: dict[str, Any],
     current_hhmm: int,
     completed_through_hhmm: int,
+    entry_date: str | None = None,
+    historical_reference: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     latest_price = _finite(quote.get("price")) or _finite(quote.get("last_price"))
     if latest_price is None and not current.empty:
         latest_price = _finite(current.iloc[-1]["price"])
     reference_price, reference_source, entry_date, reference_meta = _t_close_reference(
-        trade_date=trade_date, symbol=symbol, quote=quote
+        trade_date=trade_date,
+        symbol=symbol,
+        quote=quote,
+        entry_date=entry_date,
+        historical_reference=historical_reference,
     )
     common = {
         "stock_code": symbol,
         "stock_name": name,
         "sell_rule": RULE_NAME,
+        "sell_rule_description": RULE_DESCRIPTION,
         "entry_date": entry_date,
         "t_close_price": reference_price,
         "t_close_price_source": reference_source,
@@ -546,6 +755,7 @@ def _evaluate_one(
             "catastrophe_return": CATASTROPHE_RETURN,
             "catastrophe_max_mfe": CATASTROPHE_MAX_MFE,
             "fallback_fill_hhmm": FALLBACK_FILL_HHMM,
+            "fee_rate_per_side": FEE_RATE_PER_SIDE,
         },
     }
     if reference_price is None or reference_price <= 0:
@@ -569,11 +779,18 @@ def _evaluate_one(
     sell_price = _finite(rule.get("sell_price"))
     mark_price = sell_price if sell_price is not None else latest_price
     displayed_return = mark_price / reference_price - 1.0 if mark_price is not None else None
+    actual_return = (
+        mark_price * (1.0 - FEE_RATE_PER_SIDE)
+        / (reference_price * (1.0 + FEE_RATE_PER_SIDE))
+        - 1.0
+        if mark_price is not None
+        else None
+    )
     return {
         **common,
         **{key: value for key, value in rule.items() if key != "snapshot_states"},
         "gross_return": displayed_return,
-        "actual_return": displayed_return,
+        "actual_return": actual_return,
         "position_gross_return": displayed_return,
         "latest_position_return": latest_price / reference_price - 1.0
         if latest_price is not None
@@ -591,19 +808,36 @@ def _row_sort_key(row: dict[str, Any]) -> tuple[int, str, str]:
     return 2, str(row.get("stock_code") or ""), ""
 
 
-def evaluate_positions(request: Any, trade_date: str | None = None) -> dict[str, Any]:
-    """Return one-minute refreshed SR013 status for all ``source=positions`` rows."""
+def evaluate_positions(
+    request: Any,
+    trade_date: str | None = None,
+    requested_symbols: list[str] | None = None,
+) -> dict[str, Any]:
+    """Return one-minute refreshed SR013 status for the browser positions."""
     resolved_date = _norm_date(trade_date) or datetime.now(TZ_SHANGHAI).strftime("%Y%m%d")
     active_rows = [
         row
         for row in active_stocks.list_symbols()
-        if str(row.get("source") or "") == "positions"
+        if active_stocks.has_source(row, "positions")
     ]
-    symbols = list(
-        dict.fromkeys(
-            symbol for symbol in (_norm_symbol(row.get("symbol")) for row in active_rows) if symbol
+    if requested_symbols is None:
+        symbols = list(
+            dict.fromkeys(
+                symbol
+                for symbol in (_norm_symbol(row.get("symbol")) for row in active_rows)
+                if symbol
+            )
         )
-    )
+        symbols_source = "active_stocks sources contains positions"
+    else:
+        symbols = list(
+            dict.fromkeys(
+                symbol
+                for symbol in (_norm_symbol(value) for value in requested_symbols)
+                if symbol
+            )
+        )
+        symbols_source = "browser positions-list query, mirrored to active_stocks"
     name_map = {
         _norm_symbol(row.get("symbol")): str(row.get("name") or "") for row in active_rows
     }
@@ -633,7 +867,14 @@ def evaluate_positions(request: Any, trade_date: str | None = None) -> dict[str,
             name_map[symbol] = str(quote.get("name") or "")
 
     current_hhmm, completed_through_hhmm = _clock_context(resolved_date)
+    entry_date = _previous_date(resolved_date)
+    historical_close_map = _load_historical_close_map(entry_date, symbols)
     client = _redis_client()
+    realtime_rows = (
+        _redis_rows_batch(client, resolved_date, symbols)
+        if resolved_date == today
+        else {}
+    )
     rows: list[dict[str, Any]] = []
     errors: list[str] = []
     for symbol in symbols:
@@ -641,9 +882,12 @@ def evaluate_positions(request: Any, trade_date: str | None = None) -> dict[str,
             if resolved_date < today:
                 current = _load_historical_stock_day(resolved_date, symbol)
                 current_source = "historical_transaction_exact_order"
+            elif resolved_date == today:
+                current = realtime_rows.get(symbol, pd.DataFrame())
+                current_source = "redis_transaction_batched_in_memory"
             else:
-                current = _redis_rows(client, resolved_date, symbol)
-                current_source = "redis_transaction_in_memory"
+                current = pd.DataFrame()
+                current_source = "future_date_no_transaction_data"
             rows.append(
                 _evaluate_one(
                     symbol=symbol,
@@ -654,6 +898,8 @@ def evaluate_positions(request: Any, trade_date: str | None = None) -> dict[str,
                     quote=quotes.get(symbol, {}),
                     current_hhmm=current_hhmm,
                     completed_through_hhmm=completed_through_hhmm,
+                    entry_date=entry_date,
+                    historical_reference=historical_close_map.get(symbol, {}),
                 )
             )
         except Exception as exc:
@@ -674,8 +920,10 @@ def evaluate_positions(request: Any, trade_date: str | None = None) -> dict[str,
             "T-close reference; completed snapshots; ACT5 MFE>=5%; giveback>=2pp; "
             "catastrophe guard from 11:00; first later transaction; 14:45 first-fill fallback"
         ),
-        "symbols_source": "data/user_data/active_stocks.json where source=positions",
+        "symbols_source": symbols_source,
         "quote_request": "one TickFlow quote batch for all position symbols per refresh",
+        "redis_request": "one EXISTS pipeline plus one MGET for all position symbols per refresh",
+        "fee_rate_per_side": FEE_RATE_PER_SIDE,
         "transaction_persisted": False,
         "rows": rows,
         "count": len(rows),

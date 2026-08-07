@@ -44,6 +44,14 @@ def add_batch(req: ActiveStocksRequest) -> dict:
     }
 
 
+@router.put("/sync")
+def sync_source(req: ActiveStocksRequest) -> dict:
+    return {
+        "symbols": active_stocks.sync_source(req.symbols, req.source),
+        "active_symbols_file": str(active_stocks.active_symbols_path()),
+    }
+
+
 @router.delete("/{symbol}")
 def remove_one(symbol: str) -> dict:
     return {
