@@ -2,11 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Volume2,
-  VolumeX,
   Radio,
   Wifi,
   Clock,
   TrendingUp,
+  Play,
+  Loader2,
+  ChevronDown,
 } from "lucide-react";
 
 // ---- types ----
@@ -30,31 +32,43 @@ interface TelegramResponse {
   total: number;
 }
 
+interface VoiceOption {
+  engine: "chattts" | "web-speech";
+  seed?: number;
+  label: string;
+}
+
+// ---- voice options ----
+
+const VOICE_OPTIONS: VoiceOption[] = [
+  { engine: "chattts", seed: 2, label: "ChatTTS · 沉稳男声" },
+  { engine: "chattts", seed: 6616, label: "ChatTTS · 年轻女声" },
+  { engine: "chattts", seed: 1111, label: "ChatTTS · 磁性女声" },
+  { engine: "web-speech", label: "Web Speech · 浏览器" },
+];
+
 // ---- helpers ----
 
 function sectionKey(s: TelegramSection): string {
   return `${s.time}|${s.title}|${s.items.length}`;
 }
 
-/** 判断当前是否在 A 股交易时段内 */
 function isMarketOpen(): boolean {
   const now = new Date();
-  const h = now.getHours();
-  const m = now.getMinutes();
-  const t = h * 60 + m;
+  const t = now.getHours() * 60 + now.getMinutes();
   return t >= 9 * 60 + 30 && t <= 15 * 60 + 30;
 }
 
-/** 从 section items 中提取语音播报文本 */
 function buildSpeechText(s: TelegramSection): string {
   const parts = s.items
     .filter((it) => it.label && it.text)
     .map((it) => `${it.label}：${it.text}`);
   if (parts.length === 0) return s.title;
-  return `${s.title}。${parts.join("。")}`;
+  const raw = `${s.title}。${parts.join("。")}`;
+  return raw.length > 300 ? raw.slice(0, 280) + "等。" : raw;
 }
 
-// ---- color map by label ----
+// ---- color map ----
 
 const LABEL_COLORS: Record<string, string> = {
   "涨停": "text-bull",
@@ -103,99 +117,137 @@ function itemBg(label: string): string {
 export default function LiveFeed() {
   const [sections, setSections] = useState<TelegramSection[]>([]);
   const [newIds, setNewIds] = useState<Set<string>>(new Set());
-  const [muted, setMuted] = useState(() => {
-    try {
-      return localStorage.getItem("livefeed-muted") === "1";
-    } catch {
-      return false;
-    }
-  });
-  const [updatedAt, setUpdatedAt] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // 语音引擎
+  const [voiceIdx, setVoiceIdx] = useState(() => {
+    try {
+      return parseInt(localStorage.getItem("livefeed-voice") || "0", 10);
+    } catch {
+      return 0;
+    }
+  });
+  const voice = VOICE_OPTIONS[voiceIdx] || VOICE_OPTIONS[0];
+
+  // 正在播放的 section key
+  const [playingKey, setPlayingKey] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
   const seenRef = useRef<Set<string>>(new Set());
-  const containerRef = useRef<HTMLDivElement>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const speak = useCallback(
-    (s: TelegramSection) => {
-      if (muted) return;
-      if (!window.speechSynthesis) return;
+  // ---- 播放逻辑 ----
 
-      // 取消当前正在播放的语音
-      window.speechSynthesis.cancel();
+  const playWithChatTTS = useCallback(
+    async (s: TelegramSection): Promise<void> => {
+      const key = sectionKey(s);
+      setPlayingKey(key);
+
+      // 取消之前的音频
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
 
       const text = buildSpeechText(s);
-      if (text.length > 400) {
-        // 太长则截断
-        const short = text.slice(0, 380) + "等。";
-        const utt = new SpeechSynthesisUtterance(short);
-        utt.lang = "zh-CN";
-        utt.rate = 1.1;
-        utt.pitch = 1.0;
-        utt.volume = 0.9;
-        window.speechSynthesis.speak(utt);
-      } else {
-        const utt = new SpeechSynthesisUtterance(text);
-        utt.lang = "zh-CN";
-        utt.rate = 1.1;
-        utt.pitch = 1.0;
-        utt.volume = 0.9;
-        window.speechSynthesis.speak(utt);
+      const seed = voice.seed!;
+
+      try {
+        const params = new URLSearchParams({ text, seed: String(seed) });
+        const audioUrl = `/api/live-telegram/audio?${params}`;
+        const resp = await fetch(audioUrl);
+        if (!resp.ok) throw new Error(`${resp.status}`);
+
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audioRef.current = audio;
+
+        audio.onended = () => {
+          setPlayingKey(null);
+          URL.revokeObjectURL(url);
+          audioRef.current = null;
+        };
+        audio.onerror = () => {
+          setPlayingKey(null);
+          URL.revokeObjectURL(url);
+          audioRef.current = null;
+        };
+
+        await audio.play();
+      } catch (e) {
+        console.error("ChatTTS 播放失败:", e);
+        setPlayingKey(null);
       }
     },
-    [muted],
+    [voice],
   );
+
+  const playWithWebSpeech = useCallback(
+    (s: TelegramSection): void => {
+      const key = sectionKey(s);
+      setPlayingKey(key);
+
+      window.speechSynthesis?.cancel();
+
+      const text = buildSpeechText(s);
+      const utt = new SpeechSynthesisUtterance(text);
+      utt.lang = "zh-CN";
+      utt.rate = 1.1;
+      utt.pitch = 1.0;
+      utt.volume = 0.9;
+      utt.onend = () => setPlayingKey(null);
+      utt.onerror = () => setPlayingKey(null);
+
+      window.speechSynthesis?.speak(utt);
+    },
+    [],
+  );
+
+  const playSection = useCallback(
+    (s: TelegramSection) => {
+      if (voice.engine === "chattts") {
+        playWithChatTTS(s);
+      } else {
+        playWithWebSpeech(s);
+      }
+    },
+    [voice, playWithChatTTS, playWithWebSpeech],
+  );
+
+  // ---- 数据轮询 ----
 
   const fetchData = useCallback(async () => {
     try {
       const resp = await fetch("/api/live-telegram?limit=30");
       if (!resp.ok) throw new Error(`${resp.status}`);
       const data: TelegramResponse = await resp.json();
-      setUpdatedAt(data.updated_at);
       setError(null);
 
       const incoming = data.sections;
       if (incoming.length === 0) return;
 
-      // 检测新 section
-      const fresh: TelegramSection[] = [];
       const freshKeys = new Set<string>();
       for (const s of incoming) {
         const k = sectionKey(s);
         if (!seenRef.current.has(k)) {
-          fresh.push(s);
           freshKeys.add(k);
         }
       }
 
-      // 更新已见集合
-      const allKeys = new Set(incoming.map(sectionKey));
-      seenRef.current = allKeys;
+      seenRef.current = new Set(incoming.map(sectionKey));
 
-      if (fresh.length > 0 && sections.length > 0) {
-        // 有新数据 — 标记新条目用于动画，并播报
+      if (freshKeys.size > 0 && sections.length > 0) {
         setNewIds(freshKeys);
-        // 播报最新的一条
-        if (fresh.length > 0) {
-          speak(fresh[0]);
-        }
-        // 清除新条目标记（3 秒后）
-        setTimeout(() => setNewIds(new Set()), 3000);
+        setTimeout(() => setNewIds(new Set()), 4000);
       }
 
       setSections(incoming);
-
-      // 首次加载也播报最新条目
-      if (sections.length === 0 && fresh.length > 0) {
-        // 首次加载不播报，避免刷屏
-      }
     } catch (e: any) {
       setError(e.message || "加载失败");
     }
-  }, [sections.length, speak]);
+  }, [sections.length]);
 
-  // 轮询
   useEffect(() => {
     fetchData();
     const interval = isMarketOpen() ? 5000 : 15000;
@@ -205,7 +257,6 @@ export default function LiveFeed() {
     };
   }, [fetchData]);
 
-  // 在交易/非交易时段间动态调整轮询间隔
   useEffect(() => {
     const check = setInterval(() => {
       if (intervalRef.current) {
@@ -217,27 +268,29 @@ export default function LiveFeed() {
     return () => clearInterval(check);
   }, [fetchData]);
 
-  const toggleMute = () => {
-    const next = !muted;
-    setMuted(next);
+  const handleVoiceChange = (idx: number) => {
+    setVoiceIdx(idx);
     try {
-      localStorage.setItem("livefeed-muted", next ? "1" : "0");
+      localStorage.setItem("livefeed-voice", String(idx));
     } catch {
       /* ignore */
     }
-    if (next) {
-      window.speechSynthesis?.cancel();
+    // 切换引擎时停止当前播放
+    window.speechSynthesis?.cancel();
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
     }
+    setPlayingKey(null);
   };
 
   const live = isMarketOpen();
-  const lastTime =
-    sections.length > 0 ? sections[0].time : null;
+  const lastTime = sections.length > 0 ? sections[0].time : null;
 
   return (
-    <div ref={containerRef} className="flex flex-col h-full">
+    <div className="flex flex-col h-full">
       {/* ---- 顶部栏 ---- */}
-      <header className="shrink-0 border-b border-border bg-surface/80 backdrop-blur px-6 py-3 flex items-center gap-3">
+      <header className="shrink-0 border-b border-border bg-surface/80 backdrop-blur px-4 py-2.5 flex items-center gap-3 flex-wrap">
         <div className="flex items-center gap-2">
           <Radio className="h-5 w-5 text-accent" />
           <h1 className="text-lg font-semibold text-foreground tracking-wide">
@@ -259,44 +312,47 @@ export default function LiveFeed() {
 
         <div className="flex-1" />
 
+        {/* 语音引擎选择 */}
+        <div className="relative group">
+          <button className="flex items-center gap-1.5 rounded-btn border border-border bg-elevated px-2.5 py-1.5 text-xs text-secondary hover:text-foreground transition-colors cursor-pointer">
+            <Volume2 className="h-3 w-3 text-accent/70" />
+            <span className="max-w-[120px] truncate hidden sm:inline">
+              {voice.label}
+            </span>
+            <ChevronDown className="h-3 w-3 opacity-50" />
+          </button>
+          {/* 下拉菜单 */}
+          <div className="absolute right-0 top-full mt-1 w-52 rounded-card border border-border bg-surface shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-150 z-50">
+            {VOICE_OPTIONS.map((opt, i) => (
+              <button
+                key={i}
+                onClick={() => handleVoiceChange(i)}
+                className={`w-full text-left px-3 py-2 text-xs transition-colors first:rounded-t-card last:rounded-b-card cursor-pointer ${
+                  i === voiceIdx
+                    ? "bg-accent/10 text-accent font-medium"
+                    : "text-secondary hover:bg-elevated hover:text-foreground"
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  {i === voiceIdx && (
+                    <span className="h-1.5 w-1.5 rounded-full bg-accent" />
+                  )}
+                  <span className={i !== voiceIdx ? "ml-[14px]" : ""}>
+                    {opt.label}
+                  </span>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+
         {/* 最新时间 */}
         {lastTime && (
           <div className="hidden sm:flex items-center gap-1.5 font-mono text-xs text-muted">
             <Wifi className="h-3 w-3 text-accent/60" />
             <span>最新 {lastTime}</span>
-            {updatedAt && (
-              <span className="text-[10px] text-muted/50">
-                (更新于{" "}
-                {new Date(updatedAt).toLocaleTimeString("zh-CN", {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                  second: "2-digit",
-                })}
-                )
-              </span>
-            )}
           </div>
         )}
-
-        {/* 静音按钮 */}
-        <button
-          onClick={toggleMute}
-          className={`flex items-center gap-1.5 rounded-btn px-3 py-1.5 text-xs font-medium transition-all duration-200 cursor-pointer ${
-            muted
-              ? "bg-elevated text-muted hover:text-secondary border border-border"
-              : "bg-accent/15 text-accent border border-accent/30 shadow-[0_0_12px_rgba(59,130,246,0.15)]"
-          }`}
-          title={muted ? "取消静音" : "静音"}
-        >
-          {muted ? (
-            <VolumeX className="h-3.5 w-3.5" />
-          ) : (
-            <Volume2 className="h-3.5 w-3.5" />
-          )}
-          <span className="hidden sm:inline">
-            {muted ? "已静音" : "播报中"}
-          </span>
-        </button>
       </header>
 
       {/* ---- 内容区 ---- */}
@@ -325,10 +381,13 @@ export default function LiveFeed() {
 
         <AnimatePresence initial={false}>
           {sections.map((s) => {
-            const isNew = newIds.has(sectionKey(s));
+            const key = sectionKey(s);
+            const isNew = newIds.has(key);
+            const isPlaying = playingKey === key;
+
             return (
               <motion.div
-                key={sectionKey(s)}
+                key={key}
                 initial={
                   isNew
                     ? { opacity: 0, y: -20, scale: 0.97 }
@@ -350,7 +409,7 @@ export default function LiveFeed() {
                   <span className="font-mono text-xs font-semibold text-accent tabular">
                     {s.time || "--:--"}
                   </span>
-                  <span className="text-xs text-secondary truncate">
+                  <span className="text-xs text-secondary truncate flex-1">
                     {s.title}
                   </span>
                   {isNew && (
@@ -358,6 +417,23 @@ export default function LiveFeed() {
                       NEW
                     </span>
                   )}
+                  {/* 播放按钮 */}
+                  <button
+                    onClick={() => playSection(s)}
+                    disabled={isPlaying}
+                    className={`shrink-0 flex items-center justify-center w-6 h-6 rounded-md transition-all cursor-pointer ${
+                      isPlaying
+                        ? "bg-accent/20 text-accent"
+                        : "text-muted hover:text-accent hover:bg-accent/10"
+                    }`}
+                    title="朗读本条"
+                  >
+                    {isPlaying ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Play className="h-3.5 w-3.5" />
+                    )}
+                  </button>
                 </div>
 
                 {/* Items */}
@@ -394,7 +470,6 @@ export default function LiveFeed() {
           })}
         </AnimatePresence>
 
-        {/* 底部指示 */}
         {sections.length > 0 && (
           <div className="flex items-center justify-center gap-1.5 py-3 text-[10px] text-muted/50">
             <TrendingUp className="h-3 w-3" />
