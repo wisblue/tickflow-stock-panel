@@ -211,16 +211,18 @@ def get_available_seeds():
 def generate_clips(
     text: str = Query(..., description="播报文本"),
     seed: int = Query(2, description="ChatTTS 音色种子"),
+    stream: bool = Query(False, description="逐句流式输出 (NDJSON)"),
 ):
-    """调用 GPU 常驻服务分句批量生成音频，返回片段列表供前端流式播放。"""
+    """调用 GPU 常驻服务生成音频片段。stream=True 时逐句返回 NDJSON。"""
     if seed not in AVAILABLE_SEEDS:
         return Response(
             content=f"不支持的种子: {seed}，可选: {list(AVAILABLE_SEEDS)}",
             status_code=400,
         )
     try:
+        if stream:
+            return _stream_clips(text, seed)
         clips = _generate_clips(text, seed)
-        # 把 URL 改成通过本后端代理的路径
         for c in clips:
             name = c["url"].rsplit("/", 1)[-1]
             c["url"] = f"/api/live-telegram/audio/{name}"
@@ -233,6 +235,34 @@ def generate_clips(
         )
 
 
+def _stream_clips(text: str, seed: int):
+    """流式代理 GPU 服务的 NDJSON 输出，改写 URL 路径。"""
+    import urllib.request
+    import json as _json
+
+    body = _json.dumps({"text": text, "seed": seed, "stream": True}).encode()
+    req = urllib.request.Request(
+        f"{_GPU_SERVER}/generate",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    def _iter():
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            for line in resp:
+                line = line.decode("utf-8").strip()
+                if not line:
+                    continue
+                clip = _json.loads(line)
+                name = clip["url"].rsplit("/", 1)[-1]
+                clip["url"] = f"/api/live-telegram/audio/{name}"
+                yield _json.dumps(clip, ensure_ascii=False) + "\n"
+
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(_iter(), media_type="application/x-ndjson")
+
+
 @router.get("/audio/{name}")
 def proxy_audio(name: str):
     """代理 GPU 服务的 WAV 文件到前端。"""
@@ -241,7 +271,7 @@ def proxy_audio(name: str):
         with urllib.request.urlopen(f"{_GPU_SERVER}/audio/{name}", timeout=10) as resp:
             return Response(
                 content=resp.read(),
-                media_type="audio/wav",
+                media_type="audio/mpeg",
             )
     except Exception:
         return Response(content="音频文件未找到", status_code=404)

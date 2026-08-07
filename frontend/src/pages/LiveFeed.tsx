@@ -165,6 +165,32 @@ export default function LiveFeed() {
     }
   }, []);
 
+  const queueRef = useRef<{ url: string }[]>([]);
+  const playingRef = useRef(false);
+
+  const pumpQueue = useCallback(async () => {
+    if (playingRef.current) return;
+    playingRef.current = true;
+
+    while (!abortRef.current) {
+      const clip = queueRef.current.shift();
+      if (!clip) { playingRef.current = false; break; }
+
+      setClipProgress(`${clip.index + 1}/${clip.total}`);
+      const audio = new Audio(clip.url);
+      audioRef.current = audio;
+
+      try {
+        await new Promise<void>((resolve) => {
+          audio.onended = () => resolve();
+          audio.onerror = () => resolve();
+          audio.play().catch(() => resolve());
+        });
+      } catch { /* ignore */ }
+    }
+    playingRef.current = false;
+  }, []);
+
   const playWithChatTTS = useCallback(
     async (s: TelegramSection): Promise<void> => {
       const key = sectionKey(s);
@@ -172,25 +198,47 @@ export default function LiveFeed() {
       setClipProgress("...");
       abortRef.current = true;
       if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
+      queueRef.current = [];
 
       const text = buildSpeechText(s);
       const seed = voice.seed!;
 
       try {
-        const params = new URLSearchParams({ text, seed: String(seed) });
+        const params = new URLSearchParams({ text, seed: String(seed), stream: "true" });
         const resp = await fetch(`/api/live-telegram/clips?${params}`, { method: "POST" });
         if (!resp.ok) throw new Error(`${resp.status}`);
-        const data = await resp.json();
-        const clips: { url: string; duration: number }[] = data.clips || [];
-        if (clips.length === 0) throw new Error("no clips");
-        await playClipSeq(clips);
+
+        const reader = resp.body?.getReader();
+        if (!reader) throw new Error("no stream");
+        const decoder = new TextDecoder();
+        abortRef.current = false;
+
+        // 读取第一句后立即开始播放
+        let buf = "";
+        while (!abortRef.current) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+
+          const lines = buf.split("\n");
+          buf = lines.pop() || "";  // 保留未完成的行
+
+          for (const line of lines) {
+            if (!line.trim() || abortRef.current) continue;
+            try {
+              const clip = JSON.parse(line);
+              queueRef.current.push(clip);
+              pumpQueue();  // 非阻塞启动播放
+            } catch { /* skip */ }
+          }
+        }
       } catch (e) {
         console.error("ChatTTS 播放失败:", e);
       }
       setPlayingKey(null);
       setClipProgress("");
     },
-    [voice, playClipSeq],
+    [voice, pumpQueue],
   );
 
   const playWithWebSpeech = useCallback(
