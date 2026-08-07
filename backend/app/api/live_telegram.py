@@ -25,9 +25,9 @@ router = APIRouter(prefix="/api/live-telegram", tags=["live-telegram"])
 # 电报文件路径 — 文件名后缀为当天日期
 TELEGRAM_DIR = Path("/home/dennis/mmrs/data/daily")
 
-# ChatTTS 音频生成脚本路径（使用 conda re_3 环境中的系统 Python）
-_CHATTTS_SCRIPT = Path("/home/dennis/mmrs/app/audio/exp/gen_audio_cli.py")
-_SYSTEM_PYTHON = "/home/dennis/anaconda3/envs/re_3/bin/python3"
+# ---- ChatTTS GPU 常驻服务 ----
+
+_GPU_SERVER = "http://127.0.0.1:8765"
 
 AVAILABLE_SEEDS = {
     2: "沉稳男声",
@@ -36,36 +36,21 @@ AVAILABLE_SEEDS = {
 }
 
 
-def _generate_audio(text: str, seed: int) -> bytes:
-    """通过子进程调用系统 Python 的 ChatTTS 生成 WAV 音频。"""
-    proc = subprocess.run(
-        [_SYSTEM_PYTHON, str(_CHATTTS_SCRIPT), str(seed)],
-        input=text.encode("utf-8"),
-        capture_output=True,
-        timeout=120,
-        cwd=str(_CHATTTS_SCRIPT.parent),  # 复用已下载的模型文件
+def _generate_clips(text: str, seed: int) -> list[dict]:
+    """调用 GPU 常驻服务，分句批量生成音频片段。"""
+    import urllib.request
+    import json as _json
+
+    body = _json.dumps({"text": text, "seed": seed}).encode()
+    req = urllib.request.Request(
+        f"{_GPU_SERVER}/generate",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
     )
-    if proc.returncode != 0:
-        stderr = proc.stderr.decode(errors="replace")[:200]
-        raise RuntimeError(f"ChatTTS 子进程失败 (exit={proc.returncode}): {stderr}")
-    return proc.stdout
-
-
-def _warmup_chattts():
-    """后台预热 ChatTTS 模型，避免首次请求超时。"""
-    import threading
-    def _warm():
-        try:
-            _generate_audio("预热", 2)
-            logger.info("ChatTTS 模型预热完成")
-        except Exception as e:
-            logger.warning("ChatTTS 预热失败: %s", e)
-    t = threading.Thread(target=_warm, daemon=True)
-    t.start()
-
-
-# 模块加载时自动预热
-_warmup_chattts()
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        data = _json.loads(resp.read())
+    return data.get("clips", [])
 
 
 def _telegram_path() -> Path | None:
@@ -222,27 +207,41 @@ def get_available_seeds():
     }
 
 
-@router.get("/audio")
-def generate_audio(
+@router.post("/clips")
+def generate_clips(
     text: str = Query(..., description="播报文本"),
     seed: int = Query(2, description="ChatTTS 音色种子"),
 ):
-    """用 ChatTTS 生成语音，返回 WAV 音频。"""
+    """调用 GPU 常驻服务分句批量生成音频，返回片段列表供前端流式播放。"""
     if seed not in AVAILABLE_SEEDS:
         return Response(
             content=f"不支持的种子: {seed}，可选: {list(AVAILABLE_SEEDS)}",
             status_code=400,
         )
     try:
-        audio_bytes = _generate_audio(text, seed)
-        return Response(
-            content=audio_bytes,
-            media_type="audio/wav",
-            headers={"Content-Disposition": "inline"},
-        )
+        clips = _generate_clips(text, seed)
+        # 把 URL 改成通过本后端代理的路径
+        for c in clips:
+            name = c["url"].rsplit("/", 1)[-1]
+            c["url"] = f"/api/live-telegram/audio/{name}"
+        return {"clips": clips}
     except Exception as e:
-        logger.exception("ChatTTS 音频生成失败")
+        logger.exception("ChatTTS 片段生成失败")
         return Response(
-            content=f"音频生成失败: {e}",
+            content=f"生成失败: {e}",
             status_code=500,
         )
+
+
+@router.get("/audio/{name}")
+def proxy_audio(name: str):
+    """代理 GPU 服务的 WAV 文件到前端。"""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"{_GPU_SERVER}/audio/{name}", timeout=10) as resp:
+            return Response(
+                content=resp.read(),
+                media_type="audio/wav",
+            )
+    except Exception:
+        return Response(content="音频文件未找到", status_code=404)

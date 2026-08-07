@@ -133,65 +133,73 @@ export default function LiveFeed() {
   const voiceBtnRef = useRef<HTMLButtonElement>(null);
   const [voiceMenuPos, setVoiceMenuPos] = useState({ top: 0, left: 0 });
 
-  // 正在播放的 section key
+  // 正在播放的 section key + 片段进度
   const [playingKey, setPlayingKey] = useState<string | null>(null);
+  const [clipProgress, setClipProgress] = useState("");
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const abortRef = useRef(false);
 
   const seenRef = useRef<Set<string>>(new Set());
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // ---- 播放逻辑 ----
+  // ---- 流式播放（ChatTTS 分句） ----
+
+  const playClipSeq = useCallback(async (clips: { url: string; duration: number }[]) => {
+    abortRef.current = false;
+    for (let i = 0; i < clips.length; i++) {
+      if (abortRef.current) break;
+      setClipProgress(`${i + 1}/${clips.length}`);
+
+      const audio = new Audio(clips[i].url);
+      audioRef.current = audio;
+
+      try {
+        await new Promise<void>((resolve, reject) => {
+          audio.onended = () => resolve();
+          audio.onerror = () => reject(new Error("play error"));
+          audio.play().catch(reject);
+        });
+      } catch {
+        if (!abortRef.current) break;
+      }
+    }
+  }, []);
 
   const playWithChatTTS = useCallback(
     async (s: TelegramSection): Promise<void> => {
       const key = sectionKey(s);
       setPlayingKey(key);
-
-      // 取消之前的音频
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current = null;
-      }
+      setClipProgress("...");
+      abortRef.current = true;
+      if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
 
       const text = buildSpeechText(s);
       const seed = voice.seed!;
 
       try {
         const params = new URLSearchParams({ text, seed: String(seed) });
-        const audioUrl = `/api/live-telegram/audio?${params}`;
-        const resp = await fetch(audioUrl);
+        const resp = await fetch(`/api/live-telegram/clips?${params}`, { method: "POST" });
         if (!resp.ok) throw new Error(`${resp.status}`);
-
-        const blob = await resp.blob();
-        const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        audioRef.current = audio;
-
-        audio.onended = () => {
-          setPlayingKey(null);
-          URL.revokeObjectURL(url);
-          audioRef.current = null;
-        };
-        audio.onerror = () => {
-          setPlayingKey(null);
-          URL.revokeObjectURL(url);
-          audioRef.current = null;
-        };
-
-        await audio.play();
+        const data = await resp.json();
+        const clips: { url: string; duration: number }[] = data.clips || [];
+        if (clips.length === 0) throw new Error("no clips");
+        await playClipSeq(clips);
       } catch (e) {
         console.error("ChatTTS 播放失败:", e);
-        setPlayingKey(null);
       }
+      setPlayingKey(null);
+      setClipProgress("");
     },
-    [voice],
+    [voice, playClipSeq],
   );
 
   const playWithWebSpeech = useCallback(
     (s: TelegramSection): void => {
       const key = sectionKey(s);
       setPlayingKey(key);
-
+      setClipProgress("");
+      abortRef.current = true;
+      if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
       window.speechSynthesis?.cancel();
 
       const text = buildSpeechText(s);
@@ -200,9 +208,8 @@ export default function LiveFeed() {
       utt.rate = 1.1;
       utt.pitch = 1.0;
       utt.volume = 0.9;
-      utt.onend = () => setPlayingKey(null);
-      utt.onerror = () => setPlayingKey(null);
-
+      utt.onend = () => { setPlayingKey(null); setClipProgress(""); };
+      utt.onerror = () => { setPlayingKey(null); setClipProgress(""); };
       window.speechSynthesis?.speak(utt);
     },
     [],
@@ -449,7 +456,7 @@ export default function LiveFeed() {
                   <button
                     onClick={() => playSection(s)}
                     disabled={isPlaying}
-                    className={`shrink-0 flex items-center justify-center w-6 h-6 rounded-md transition-all cursor-pointer ${
+                    className={`shrink-0 flex items-center gap-1 rounded-md px-1.5 py-0.5 transition-all cursor-pointer ${
                       isPlaying
                         ? "bg-accent/20 text-accent"
                         : "text-muted hover:text-accent hover:bg-accent/10"
@@ -457,7 +464,12 @@ export default function LiveFeed() {
                     title="朗读本条"
                   >
                     {isPlaying ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      <>
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                        {clipProgress && (
+                          <span className="text-[9px] font-mono text-accent/70">{clipProgress}</span>
+                        )}
+                      </>
                     ) : (
                       <Play className="h-3.5 w-3.5" />
                     )}
