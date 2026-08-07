@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Volume2,
@@ -129,6 +130,8 @@ export default function LiveFeed() {
   });
   const voice = VOICE_OPTIONS[voiceIdx] || VOICE_OPTIONS[0];
   const [voiceMenuOpen, setVoiceMenuOpen] = useState(false);
+  const voiceBtnRef = useRef<HTMLButtonElement>(null);
+  const [voiceMenuPos, setVoiceMenuPos] = useState({ top: 0, left: 0 });
 
   // 正在播放的 section key
   const [playingKey, setPlayingKey] = useState<string | null>(null);
@@ -314,25 +317,35 @@ export default function LiveFeed() {
         <div className="flex-1" />
 
         {/* 语音引擎选择 */}
-        <div className="relative">
-          <button
-            onClick={() => setVoiceMenuOpen((v) => !v)}
-            className="flex items-center gap-1.5 rounded-btn border border-border bg-elevated px-2.5 py-1.5 text-xs text-secondary hover:text-foreground transition-colors cursor-pointer"
-          >
-            <Volume2 className="h-3 w-3 text-accent/70" />
-            <span className="max-w-[120px] truncate hidden sm:inline">
-              {voice.label}
-            </span>
-            <ChevronDown className="h-3 w-3 opacity-50" />
-          </button>
-          {/* 下拉菜单 — click 展开，z-50 确保不被内容遮挡 */}
-          {voiceMenuOpen && (
+        <button
+          ref={voiceBtnRef}
+          onClick={() => {
+            const rect = voiceBtnRef.current?.getBoundingClientRect();
+            if (rect) {
+              setVoiceMenuPos({ top: rect.bottom + 4, left: rect.right - 208 });
+            }
+            setVoiceMenuOpen((v) => !v);
+          }}
+          className="flex items-center gap-1.5 rounded-btn border border-border bg-elevated px-2.5 py-1.5 text-xs text-secondary hover:text-foreground transition-colors cursor-pointer"
+        >
+          <Volume2 className="h-3 w-3 text-accent/70" />
+          <span className="max-w-[120px] truncate hidden sm:inline">
+            {voice.label}
+          </span>
+          <ChevronDown className="h-3 w-3 opacity-50" />
+        </button>
+        {/* 下拉菜单 — portal 到 body，避免被父容器 overflow 裁切 */}
+        {voiceMenuOpen &&
+          createPortal(
             <>
               <div
-                className="fixed inset-0 z-40"
+                className="fixed inset-0 z-[9998]"
                 onClick={() => setVoiceMenuOpen(false)}
               />
-              <div className="absolute right-0 top-full mt-1 w-52 rounded-card border border-border bg-surface shadow-2xl z-50">
+              <div
+                className="fixed z-[9999] w-52 rounded-card border border-border bg-surface shadow-2xl"
+                style={{ top: voiceMenuPos.top, left: voiceMenuPos.left }}
+              >
                 {VOICE_OPTIONS.map((opt, i) => (
                   <button
                     key={i}
@@ -357,9 +370,9 @@ export default function LiveFeed() {
                   </button>
                 ))}
               </div>
-            </>
+            </>,
+            document.body,
           )}
-        </div>
 
         {/* 最新时间 */}
         {lastTime && (
