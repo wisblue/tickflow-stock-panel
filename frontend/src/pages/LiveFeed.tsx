@@ -128,6 +128,7 @@ export default function LiveFeed() {
     }
   });
   const voice = VOICE_OPTIONS[voiceIdx] || VOICE_OPTIONS[0];
+  const [voiceMenuOpen, setVoiceMenuOpen] = useState(false);
 
   // 正在播放的 section key
   const [playingKey, setPlayingKey] = useState<string | null>(null);
@@ -313,37 +314,51 @@ export default function LiveFeed() {
         <div className="flex-1" />
 
         {/* 语音引擎选择 */}
-        <div className="relative group">
-          <button className="flex items-center gap-1.5 rounded-btn border border-border bg-elevated px-2.5 py-1.5 text-xs text-secondary hover:text-foreground transition-colors cursor-pointer">
+        <div className="relative">
+          <button
+            onClick={() => setVoiceMenuOpen((v) => !v)}
+            className="flex items-center gap-1.5 rounded-btn border border-border bg-elevated px-2.5 py-1.5 text-xs text-secondary hover:text-foreground transition-colors cursor-pointer"
+          >
             <Volume2 className="h-3 w-3 text-accent/70" />
             <span className="max-w-[120px] truncate hidden sm:inline">
               {voice.label}
             </span>
             <ChevronDown className="h-3 w-3 opacity-50" />
           </button>
-          {/* 下拉菜单 */}
-          <div className="absolute right-0 top-full mt-1 w-52 rounded-card border border-border bg-surface shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-150 z-50">
-            {VOICE_OPTIONS.map((opt, i) => (
-              <button
-                key={i}
-                onClick={() => handleVoiceChange(i)}
-                className={`w-full text-left px-3 py-2 text-xs transition-colors first:rounded-t-card last:rounded-b-card cursor-pointer ${
-                  i === voiceIdx
-                    ? "bg-accent/10 text-accent font-medium"
-                    : "text-secondary hover:bg-elevated hover:text-foreground"
-                }`}
-              >
-                <div className="flex items-center gap-2">
-                  {i === voiceIdx && (
-                    <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-                  )}
-                  <span className={i !== voiceIdx ? "ml-[14px]" : ""}>
-                    {opt.label}
-                  </span>
-                </div>
-              </button>
-            ))}
-          </div>
+          {/* 下拉菜单 — click 展开，z-50 确保不被内容遮挡 */}
+          {voiceMenuOpen && (
+            <>
+              <div
+                className="fixed inset-0 z-40"
+                onClick={() => setVoiceMenuOpen(false)}
+              />
+              <div className="absolute right-0 top-full mt-1 w-52 rounded-card border border-border bg-surface shadow-2xl z-50">
+                {VOICE_OPTIONS.map((opt, i) => (
+                  <button
+                    key={i}
+                    onClick={() => {
+                      handleVoiceChange(i);
+                      setVoiceMenuOpen(false);
+                    }}
+                    className={`w-full text-left px-3 py-2 text-xs transition-colors first:rounded-t-card last:rounded-b-card cursor-pointer ${
+                      i === voiceIdx
+                        ? "bg-accent/10 text-accent font-medium"
+                        : "text-secondary hover:bg-elevated hover:text-foreground"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      {i === voiceIdx && (
+                        <span className="h-1.5 w-1.5 rounded-full bg-accent" />
+                      )}
+                      <span className={i !== voiceIdx ? "ml-[14px]" : ""}>
+                        {opt.label}
+                      </span>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
         </div>
 
         {/* 最新时间 */}
