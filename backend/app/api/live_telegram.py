@@ -9,6 +9,7 @@ ChatTTS 音频生成通过系统 Python (conda re_3) 子进程调用，
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import subprocess
@@ -194,6 +195,54 @@ def get_raw_telegram():
         "raw": path.read_text(encoding="utf-8"),
         "file": str(path),
     }
+
+
+@router.get("/header")
+def get_header_state():
+    """返回仪表盘顶部持久信息栏的三项数据。
+
+    从传播 pipeline 写入的 header sidecar JSON 读取，包含：
+    1. hot_concepts — 热门概念板块 + 方向信号 (▲加速/▼衰减/→维持/🆕新出)
+    2. watchlist — 状态机跟踪的个股 (观察/关注/待确认/确认)
+    3. market_summary — 市场主线摘要 + 涨跌停计数
+    """
+    path = _telegram_path()
+    if path is None:
+        return {
+            "hot_concepts": [],
+            "watchlist": [],
+            "market_summary": {"main_theme": "", "key_stocks": [], "limit_up_count": 0, "limit_down_count": 0},
+            "updated_at": None,
+        }
+
+    header_path = path.with_suffix(".header.json")
+    if not header_path.exists():
+        # Fallback: try any .header.json in the telegram dir
+        candidates = sorted(
+            TELEGRAM_DIR.glob("etf_minute_telegrams_*.header.json"),
+            reverse=True,
+        )
+        header_path = candidates[0] if candidates else None
+
+    if header_path is None:
+        return {
+            "hot_concepts": [],
+            "watchlist": [],
+            "market_summary": {"main_theme": "", "key_stocks": [], "limit_up_count": 0, "limit_down_count": 0},
+            "updated_at": None,
+        }
+
+    try:
+        raw = header_path.read_text(encoding="utf-8")
+        return json.loads(raw)
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Failed to read header sidecar: %s", exc)
+        return {
+            "hot_concepts": [],
+            "watchlist": [],
+            "market_summary": {"main_theme": "", "key_stocks": [], "limit_up_count": 0, "limit_down_count": 0},
+            "updated_at": None,
+        }
 
 
 @router.get("/seeds")

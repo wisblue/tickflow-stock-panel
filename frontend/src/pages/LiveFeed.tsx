@@ -33,6 +33,37 @@ interface TelegramResponse {
   total: number;
 }
 
+// ---- header data types ----
+
+interface HeaderConcept {
+  name: string;
+  direction: string;     // ▲加速 / ▼衰减 / →维持 / 🆕新出
+  recent_activity: number;
+}
+
+interface HeaderStock {
+  name: string;
+  state: string;          // 观察 / 关注 / 待确认 / 确认
+  concepts: string[];
+  consecutive_minutes: number;
+  return_pct: number | null;
+  anchor: string | null;
+}
+
+interface HeaderMarketSummary {
+  main_theme: string;
+  key_stocks: string[];
+  limit_up_count: number;
+  limit_down_count: number;
+}
+
+interface HeaderState {
+  hot_concepts: HeaderConcept[];
+  watchlist: HeaderStock[];
+  market_summary: HeaderMarketSummary;
+  updated_at: string | null;
+}
+
 interface VoiceOption {
   engine: "chattts" | "web-speech";
   seed?: number;
@@ -141,6 +172,31 @@ export default function LiveFeed() {
 
   const seenRef = useRef<Set<string>>(new Set());
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // ---- 顶部持久信息栏 ----
+
+  const [header, setHeader] = useState<HeaderState>({
+    hot_concepts: [],
+    watchlist: [],
+    market_summary: {
+      main_theme: "",
+      key_stocks: [],
+      limit_up_count: 0,
+      limit_down_count: 0,
+    },
+    updated_at: null,
+  });
+
+  const fetchHeader = useCallback(async () => {
+    try {
+      const resp = await fetch("/api/live-telegram/header");
+      if (!resp.ok) return;
+      const data: HeaderState = await resp.json();
+      setHeader(data);
+    } catch {
+      /* header fetch is best-effort */
+    }
+  }, []);
 
   // ---- 流式播放（ChatTTS 分句） ----
 
@@ -309,12 +365,16 @@ export default function LiveFeed() {
 
   useEffect(() => {
     fetchData();
+    fetchHeader();
     const interval = isMarketOpen() ? 5000 : 15000;
     intervalRef.current = setInterval(fetchData, interval);
+    // Header refreshes every 12s (2-3× the feed interval)
+    const headerInterval = setInterval(fetchHeader, 12000);
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
+      clearInterval(headerInterval);
     };
-  }, [fetchData]);
+  }, [fetchData, fetchHeader]);
 
   useEffect(() => {
     const check = setInterval(() => {
@@ -437,6 +497,108 @@ export default function LiveFeed() {
           </div>
         )}
       </header>
+
+      {/* ---- 持久信息栏：热门概念 + 重点观察 + 市场主线 ---- */}
+      {(header.hot_concepts.length > 0 || header.watchlist.length > 0) && (
+        <div className="shrink-0 border-b border-border bg-elevated/30 px-4 py-2 space-y-1.5">
+          {/* Row 1: 热门概念 + 方向信号 */}
+          {header.hot_concepts.length > 0 && (
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-[10px] font-semibold text-amber-400/70 uppercase tracking-wide shrink-0">
+                热门概念
+              </span>
+              {header.hot_concepts.slice(0, 6).map((c) => {
+                const dirClass =
+                  c.direction === "▲加速"
+                    ? "text-emerald-400"
+                    : c.direction === "▼衰减"
+                      ? "text-rose-400"
+                      : c.direction === "🆕新出"
+                        ? "text-sky-400"
+                        : "text-slate-400";
+                return (
+                  <span
+                    key={c.name}
+                    className="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[11px] bg-surface border border-border/60"
+                  >
+                    <span className={dirClass}>{c.direction}</span>
+                    <span className="text-foreground/80">{c.name}</span>
+                  </span>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Row 2: 重点观察个股 + 市场纵览 */}
+          <div className="flex items-center gap-3 flex-wrap">
+            {header.watchlist.length > 0 && (
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[10px] font-semibold text-cyan-400/70 uppercase tracking-wide shrink-0">
+                  重点观察
+                </span>
+                {header.watchlist.slice(0, 5).map((s) => {
+                  const stateColor =
+                    s.state === "确认"
+                      ? "text-emerald-400 bg-emerald-500/15"
+                      : s.state === "待确认"
+                        ? "text-sky-400 bg-sky-500/15"
+                        : s.state === "关注"
+                          ? "text-amber-400 bg-amber-500/15"
+                          : "text-slate-400 bg-slate-500/10";
+                  const pct =
+                    s.return_pct != null
+                      ? (s.return_pct >= 0 ? "+" : "") + s.return_pct.toFixed(1) + "%"
+                      : "";
+                  return (
+                    <span
+                      key={s.name}
+                      className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] bg-surface border border-border/60"
+                      title={`${s.concepts.slice(0, 2).join("、")} · 连续${s.consecutive_minutes}分钟${s.anchor ? ` · 锚点${s.anchor}` : ""}`}
+                    >
+                      <span className="text-foreground/80 font-medium">
+                        {s.name}
+                      </span>
+                      <span className={`rounded-sm px-0.5 text-[9px] font-semibold ${stateColor}`}>
+                        {s.state}
+                      </span>
+                      {pct && (
+                        <span
+                          className={`text-[10px] tabular-nums ${
+                            s.return_pct != null && s.return_pct >= 0
+                              ? "text-bull/70"
+                              : "text-bear/70"
+                          }`}
+                        >
+                          {pct}
+                        </span>
+                      )}
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Market quick stats */}
+            <div className="flex items-center gap-2 text-[10px] text-muted/70 ml-auto">
+              {header.market_summary.main_theme && (
+                <span className="hidden sm:inline text-secondary/70 truncate max-w-[200px]">
+                  {header.market_summary.main_theme}
+                </span>
+              )}
+              {header.market_summary.limit_up_count > 0 && (
+                <span className="text-bull/70 font-mono tabular-nums">
+                  涨停{header.market_summary.limit_up_count}
+                </span>
+              )}
+              {header.market_summary.limit_down_count > 0 && (
+                <span className="text-bear/70 font-mono tabular-nums">
+                  跌停{header.market_summary.limit_down_count}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ---- 内容区 ---- */}
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-2.5">
