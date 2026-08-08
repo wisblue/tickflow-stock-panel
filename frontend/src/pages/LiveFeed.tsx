@@ -480,41 +480,62 @@ export default function LiveFeed() {
       {/* ---- 持久信息栏：热门概念 + 重点观察 + 市场主线 ---- */}
       {(header.hot_concepts.length > 0 || header.watchlist.length > 0) && (
         <div className="shrink-0 border-b border-border bg-elevated/30 px-4 py-2 space-y-1.5">
-          {/* Row 1: 热门概念 + 方向信号 */}
-          {header.hot_concepts.length > 0 && (
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="text-[10px] font-semibold text-amber-400/70 uppercase tracking-wide shrink-0">
-                热门概念
-              </span>
-              {header.hot_concepts.slice(0, 6).map((c) => {
-                const dirClass =
-                  c.direction === "▲加速"
-                    ? "text-emerald-400"
-                    : c.direction === "▼衰减"
-                      ? "text-rose-400"
-                      : c.direction === "🆕新出"
-                        ? "text-sky-400"
-                        : "text-slate-400";
-                return (
-                  <span
-                    key={c.name}
-                    className="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[11px] bg-surface border border-border/60"
-                  >
-                    <span className={dirClass}>{c.direction}</span>
-                    <span className="text-foreground/80">{c.name}</span>
-                  </span>
-                );
-              })}
+          <div className="flex gap-3">
+            {/* 左栏：热门概念 */}
+            <div className="flex-1 min-w-0 rounded-card border border-border bg-surface/70 px-3 py-2 space-y-1.5">
+              <div className="text-[10px] font-semibold text-amber-400/70 uppercase tracking-wide">
+                🔥 热门概念
+              </div>
+              <div className="flex items-center gap-1 flex-wrap">
+                {header.hot_concepts.length === 0 && (
+                  <span className="text-[11px] text-muted/50">等待数据…</span>
+                )}
+                {header.hot_concepts.slice(0, 6).map((c) => {
+                  const dirClass =
+                    c.direction === "▲加速"
+                      ? "text-emerald-400"
+                      : c.direction === "▼衰减"
+                        ? "text-rose-400"
+                        : c.direction === "🆕新出"
+                          ? "text-sky-400"
+                          : "text-slate-400";
+                  return (
+                    <span
+                      key={c.name}
+                      className="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[11px] bg-elevated/60 border border-border/60"
+                    >
+                      <span className={dirClass}>{c.direction}</span>
+                      <span className="text-foreground/80">{c.name}</span>
+                    </span>
+                  );
+                })}
+              </div>
+              {header.market_summary.main_theme && (
+                <div className="text-[10px] text-muted/60 truncate">
+                  {header.market_summary.main_theme}
+                  {header.market_summary.limit_up_count > 0 && (
+                    <span className="ml-2 text-bull/60">
+                      涨停{header.market_summary.limit_up_count}
+                    </span>
+                  )}
+                  {header.market_summary.limit_down_count > 0 && (
+                    <span className="ml-1 text-bear/60">
+                      跌停{header.market_summary.limit_down_count}
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
-          )}
 
-          {/* Row 2: 重点观察个股 + 市场纵览 */}
-          <div className="flex items-center gap-3 flex-wrap">
-            {header.watchlist.length > 0 && (
-              <div className="flex items-center gap-1.5 flex-wrap">
-                <span className="text-[10px] font-semibold text-cyan-400/70 uppercase tracking-wide shrink-0">
-                  重点观察
-                </span>
+            {/* 右栏：重点观察 */}
+            <div className="flex-1 min-w-0 rounded-card border border-border bg-surface/70 px-3 py-2 space-y-1.5">
+              <div className="text-[10px] font-semibold text-cyan-400/70 uppercase tracking-wide">
+                👁 重点观察
+              </div>
+              <div className="flex items-center gap-1 flex-wrap">
+                {header.watchlist.length === 0 && (
+                  <span className="text-[11px] text-muted/50">暂无跟踪个股</span>
+                )}
                 {header.watchlist.slice(0, 5).map((s) => {
                   const stateColor =
                     s.state === "确认"
@@ -531,7 +552,7 @@ export default function LiveFeed() {
                   return (
                     <span
                       key={s.name}
-                      className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] bg-surface border border-border/60"
+                      className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] bg-elevated/60 border border-border/60"
                       title={`${s.concepts.slice(0, 2).join("、")} · 连续${s.consecutive_minutes}分钟${s.anchor ? ` · 锚点${s.anchor}` : ""}`}
                     >
                       <span className="text-foreground/80 font-medium">
@@ -555,25 +576,6 @@ export default function LiveFeed() {
                   );
                 })}
               </div>
-            )}
-
-            {/* Market quick stats */}
-            <div className="flex items-center gap-2 text-[10px] text-muted/70 ml-auto">
-              {header.market_summary.main_theme && (
-                <span className="hidden sm:inline text-secondary/70 truncate max-w-[200px]">
-                  {header.market_summary.main_theme}
-                </span>
-              )}
-              {header.market_summary.limit_up_count > 0 && (
-                <span className="text-bull/70 font-mono tabular-nums">
-                  涨停{header.market_summary.limit_up_count}
-                </span>
-              )}
-              {header.market_summary.limit_down_count > 0 && (
-                <span className="text-bear/70 font-mono tabular-nums">
-                  跌停{header.market_summary.limit_down_count}
-                </span>
-              )}
             </div>
           </div>
         </div>
