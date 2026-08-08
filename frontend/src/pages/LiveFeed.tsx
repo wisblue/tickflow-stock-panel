@@ -8,7 +8,7 @@ import {
   Clock,
   TrendingUp,
   Play,
-  Square,
+  VolumeX,
   ChevronDown,
 } from "lucide-react";
 
@@ -219,12 +219,16 @@ export default function LiveFeed() {
   const [playingKey, setPlayingKey] = useState<string | null>(null);
   const [clipProgress, setClipProgress] = useState("");
   const [playbackError, setPlaybackError] = useState<string | null>(null);
+  const [autoPlaybackEnabled, setAutoPlaybackEnabled] = useState(true);
+  const autoPlaybackEnabledRef = useRef(true);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const requestAbortRef = useRef<AbortController | null>(null);
   const playbackSessionRef = useRef(0);
   const stopCurrentClipRef = useRef<(() => void) | null>(null);
 
   const seenRef = useRef<Set<string>>(new Set());
+  const feedInitializedRef = useRef(false);
+  const feedFetchInFlightRef = useRef(false);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ---- 顶部持久信息栏 ----
@@ -468,9 +472,16 @@ export default function LiveFeed() {
     [voice, playWithChatTTS, playWithWebSpeech],
   );
 
+  const updateAutoPlayback = useCallback((enabled: boolean) => {
+    autoPlaybackEnabledRef.current = enabled;
+    setAutoPlaybackEnabled(enabled);
+  }, []);
+
   // ---- 数据轮询 ----
 
   const fetchData = useCallback(async () => {
+    if (feedFetchInFlightRef.current) return;
+    feedFetchInFlightRef.current = true;
     try {
       const resp = await fetch("/api/live-telegram?limit=30");
       if (!resp.ok) throw new Error(`${resp.status}`);
@@ -478,6 +489,8 @@ export default function LiveFeed() {
       setError(null);
 
       const incoming = data.sections;
+      const hadPreviousSnapshot = feedInitializedRef.current;
+      feedInitializedRef.current = true;
       if (incoming.length === 0) return;
 
       const freshKeys = new Set<string>();
@@ -490,16 +503,24 @@ export default function LiveFeed() {
 
       seenRef.current = new Set(incoming.map(sectionKey));
 
-      if (freshKeys.size > 0 && sections.length > 0) {
-        setNewIds(freshKeys);
-        setTimeout(() => setNewIds(new Set()), 4000);
+      if (freshKeys.size > 0 && hadPreviousSnapshot) {
+        if (sections.length > 0) {
+          setNewIds(freshKeys);
+          setTimeout(() => setNewIds(new Set()), 4000);
+        }
+        if (autoPlaybackEnabledRef.current) {
+          const latestFresh = incoming.find((section) => freshKeys.has(sectionKey(section)));
+          if (latestFresh) playSection(latestFresh);
+        }
       }
 
       setSections(incoming);
     } catch (e: any) {
       setError(e.message || "加载失败");
+    } finally {
+      feedFetchInFlightRef.current = false;
     }
-  }, [sections.length]);
+  }, [playSection, sections.length]);
 
   useEffect(() => {
     fetchData();
@@ -564,6 +585,31 @@ export default function LiveFeed() {
         </div>
 
         <div className="flex-1" />
+
+        {/* 自动播报状态 */}
+        <button
+          onClick={() => {
+            const enabled = !autoPlaybackEnabled;
+            updateAutoPlayback(enabled);
+            if (!enabled) stopPlayback();
+          }}
+          aria-pressed={autoPlaybackEnabled}
+          className={`flex items-center gap-1.5 rounded-btn border px-2.5 py-1.5 text-xs transition-colors cursor-pointer ${
+            autoPlaybackEnabled
+              ? "border-accent/30 bg-accent/10 text-accent"
+              : "border-border bg-elevated text-muted hover:text-foreground"
+          }`}
+          title={autoPlaybackEnabled ? "自动播报已开启" : "自动播报已暂停"}
+        >
+          {autoPlaybackEnabled ? (
+            <Volume2 className="h-3.5 w-3.5" />
+          ) : (
+            <VolumeX className="h-3.5 w-3.5" />
+          )}
+          <span className="hidden sm:inline">
+            {autoPlaybackEnabled ? "自动播报" : "播报暂停"}
+          </span>
+        </button>
 
         {/* 语音引擎选择 */}
         <button
@@ -806,17 +852,24 @@ export default function LiveFeed() {
                   )}
                   {/* 播放按钮 */}
                   <button
-                    onClick={() => isPlaying ? stopPlayback() : playSection(s)}
+                    onClick={() => {
+                      if (isPlaying) {
+                        updateAutoPlayback(false);
+                        stopPlayback();
+                      } else {
+                        playSection(s);
+                      }
+                    }}
                     className={`shrink-0 flex items-center gap-1 rounded-md px-1.5 py-0.5 transition-all cursor-pointer ${
                       isPlaying
                         ? "bg-accent/20 text-accent"
                         : "text-muted hover:text-accent hover:bg-accent/10"
                     }`}
-                    title="朗读本条"
+                    title={isPlaying ? "暂停并关闭自动播报" : "朗读本条"}
                   >
                     {isPlaying ? (
                       <>
-                        <Square className="h-3 w-3 fill-current" />
+                        <Volume2 className="h-3.5 w-3.5 animate-pulse" />
                         {clipProgress && (
                           <span className="text-[9px] font-mono text-accent/70">{clipProgress}</span>
                         )}
