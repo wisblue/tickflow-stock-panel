@@ -39,8 +39,8 @@ AVAILABLE_SEEDS = {
 
 def _generate_clips(text: str, seed: int) -> list[dict]:
     """调用 GPU 常驻服务，分句批量生成音频片段。"""
-    import urllib.request
     import json as _json
+    import urllib.request
 
     body = _json.dumps({"text": text, "seed": seed}).encode()
     req = urllib.request.Request(
@@ -257,7 +257,7 @@ def get_available_seeds():
 
 
 @router.post("/clips")
-def generate_clips(
+async def generate_clips(
     text: str = Query(..., description="播报文本"),
     seed: int = Query(2, description="ChatTTS 音色种子"),
     stream: bool = Query(False, description="逐句流式输出 (NDJSON)"),
@@ -270,7 +270,7 @@ def generate_clips(
         )
     try:
         if stream:
-            return _stream_clips(text, seed)
+            return await _stream_clips(text, seed)
         clips = _generate_clips(text, seed)
         for c in clips:
             name = c["url"].rsplit("/", 1)[-1]
@@ -284,32 +284,50 @@ def generate_clips(
         )
 
 
-def _stream_clips(text: str, seed: int):
-    """流式代理 GPU 服务的 NDJSON 输出，改写 URL 路径。"""
-    import urllib.request
+async def _stream_clips(text: str, seed: int):
+    """流式代理 GPU 服务的 NDJSON 输出，使用 httpx 异步流式传输。
+
+    每个 NDJSON 行到达后立即作为一个 SSE-style chunk 推送给前端，
+    前端 ReadableStream 逐 chunk 接收 → pumpQueue 逐条播放。
+    """
     import json as _json
 
-    body = _json.dumps({"text": text, "seed": seed, "stream": True}).encode()
-    req = urllib.request.Request(
-        f"{_GPU_SERVER}/generate",
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    import httpx
 
-    def _iter():
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            for line in resp:
-                line = line.decode("utf-8").strip()
-                if not line:
-                    continue
-                clip = _json.loads(line)
-                name = clip["url"].rsplit("/", 1)[-1]
-                clip["url"] = f"/api/live-telegram/audio/{name}"
-                yield _json.dumps(clip, ensure_ascii=False) + "\n"
+    body = _json.dumps({"text": text, "seed": seed, "stream": True}).encode()
+
+    async def _iter():
+        try:
+            async with (
+                httpx.AsyncClient(timeout=httpx.Timeout(120, connect=10)) as client,
+                client.stream(
+                    "POST",
+                    f"{_GPU_SERVER}/generate",
+                    content=body,
+                    headers={"Content-Type": "application/json"},
+                ) as resp,
+            ):
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line:
+                        continue
+                    clip = _json.loads(line)
+                    name = clip["url"].rsplit("/", 1)[-1]
+                    clip["url"] = f"/api/live-telegram/audio/{name}"
+                    yield _json.dumps(clip, ensure_ascii=False) + "\n"
+        except Exception as exc:
+            logger.exception("ChatTTS 流式生成失败")
+            yield _json.dumps({"error": str(exc)}, ensure_ascii=False) + "\n"
 
     from fastapi.responses import StreamingResponse
-    return StreamingResponse(_iter(), media_type="application/x-ndjson")
+    return StreamingResponse(
+        _iter(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/audio/{name}")
@@ -321,6 +339,7 @@ def proxy_audio(name: str):
             return Response(
                 content=resp.read(),
                 media_type="audio/mpeg",
+                headers={"Cache-Control": "public, max-age=31536000, immutable"},
             )
     except Exception:
         return Response(content="音频文件未找到", status_code=404)

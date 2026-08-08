@@ -8,7 +8,7 @@ import {
   Clock,
   TrendingUp,
   Play,
-  Loader2,
+  Square,
   ChevronDown,
 } from "lucide-react";
 
@@ -70,6 +70,12 @@ interface VoiceOption {
   label: string;
 }
 
+interface AudioClip {
+  url: string;
+  index: number;
+  total: number;
+}
+
 // ---- voice options ----
 
 const VOICE_OPTIONS: VoiceOption[] = [
@@ -98,6 +104,51 @@ function buildSpeechText(s: TelegramSection): string {
   if (parts.length === 0) return s.title;
   const raw = `${s.title}。${parts.join("。")}`;
   return raw.length > 300 ? raw.slice(0, 280) + "等。" : raw;
+}
+
+function speakInBrowser(text: string, startupTimeoutMs = 1_500): Promise<boolean> {
+  if (
+    !text ||
+    !("speechSynthesis" in window) ||
+    !("SpeechSynthesisUtterance" in window)
+  ) {
+    return Promise.resolve(false);
+  }
+
+  return new Promise((resolve) => {
+    const utterance = new SpeechSynthesisUtterance(text);
+    let settled = false;
+    const finish = (played: boolean) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(startupTimeout);
+      window.clearTimeout(timeout);
+      resolve(played);
+    };
+    const startupTimeout = window.setTimeout(() => {
+      window.speechSynthesis.cancel();
+      finish(false);
+    }, startupTimeoutMs);
+    const timeout = window.setTimeout(() => {
+      window.speechSynthesis.cancel();
+      finish(false);
+    }, Math.max(10_000, text.length * 500));
+
+    utterance.lang = "zh-CN";
+    utterance.rate = 1.1;
+    utterance.pitch = 1.0;
+    utterance.volume = 0.9;
+    utterance.onstart = () => window.clearTimeout(startupTimeout);
+    utterance.onend = () => finish(true);
+    utterance.onerror = () => finish(false);
+
+    try {
+      window.speechSynthesis.resume();
+      window.speechSynthesis.speak(utterance);
+    } catch {
+      finish(false);
+    }
+  });
 }
 
 // ---- color map ----
@@ -167,8 +218,11 @@ export default function LiveFeed() {
   // 正在播放的 section key + 片段进度
   const [playingKey, setPlayingKey] = useState<string | null>(null);
   const [clipProgress, setClipProgress] = useState("");
+  const [playbackError, setPlaybackError] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const abortRef = useRef(false);
+  const requestAbortRef = useRef<AbortController | null>(null);
+  const playbackSessionRef = useRef(0);
+  const stopCurrentClipRef = useRef<(() => void) | null>(null);
 
   const seenRef = useRef<Set<string>>(new Set());
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -200,57 +254,134 @@ export default function LiveFeed() {
 
   // ---- 流式播放（ChatTTS 分句） ----
 
-  const queueRef = useRef<{ url: string; index: number; total: number }[]>([]);
-  const playingRef = useRef(false);
+  const queueRef = useRef<AudioClip[]>([]);
+  const streamDoneRef = useRef(false);
+  const wakeQueueRef = useRef<(() => void) | null>(null);
 
-  const pumpQueue = useCallback(async () => {
-    if (playingRef.current) return;
-    playingRef.current = true;
-
-    while (!abortRef.current) {
-      const clip = queueRef.current.shift();
-      if (!clip) { playingRef.current = false; break; }
-
-      setClipProgress(`${clip.index + 1}/${clip.total}`);
-      const audio = new Audio(clip.url);
-      audioRef.current = audio;
-
-      try {
-        await new Promise<void>((resolve) => {
-          audio.onended = () => resolve();
-          audio.onerror = () => resolve();
-          audio.play().catch(() => resolve());
-        });
-      } catch { /* ignore */ }
-    }
-    playingRef.current = false;
+  const wakeQueue = useCallback(() => {
+    const wake = wakeQueueRef.current;
+    wakeQueueRef.current = null;
+    wake?.();
   }, []);
+
+  const stopPlayback = useCallback((clearStatus = true) => {
+    playbackSessionRef.current += 1;
+    requestAbortRef.current?.abort();
+    requestAbortRef.current = null;
+    stopCurrentClipRef.current?.();
+    stopCurrentClipRef.current = null;
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.removeAttribute("src");
+      audioRef.current.load();
+    }
+    window.speechSynthesis?.cancel();
+    queueRef.current = [];
+    streamDoneRef.current = true;
+    wakeQueue();
+    if (clearStatus) {
+      setPlayingKey(null);
+      setClipProgress("");
+    }
+  }, [wakeQueue]);
+
+  const playAudioClip = useCallback(async (clip: AudioClip, session: number) => {
+    const audio = audioRef.current ?? new Audio();
+    audioRef.current = audio;
+    audio.preload = "auto";
+    audio.src = clip.url;
+    audio.load();
+
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        audio.removeEventListener("ended", finish);
+        audio.removeEventListener("error", fail);
+        if (stopCurrentClipRef.current === finish) stopCurrentClipRef.current = null;
+      };
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve();
+      };
+      const fail = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error(`无法加载音频片段 ${clip.index + 1}`));
+      };
+
+      stopCurrentClipRef.current = finish;
+      audio.addEventListener("ended", finish, { once: true });
+      audio.addEventListener("error", fail, { once: true });
+      audio.play().catch(fail);
+
+      if (playbackSessionRef.current !== session) finish();
+    });
+  }, []);
+
+  const pumpQueue = useCallback(async (session: number): Promise<void> => {
+    while (playbackSessionRef.current === session) {
+      const clip = queueRef.current.shift();
+      if (clip) {
+        setClipProgress(`${clip.index + 1}/${clip.total}`);
+        await playAudioClip(clip, session);
+        continue;
+      }
+      if (streamDoneRef.current) break;
+
+      await new Promise<void>((resolve) => {
+        wakeQueueRef.current = resolve;
+        if (
+          queueRef.current.length > 0 ||
+          streamDoneRef.current ||
+          playbackSessionRef.current !== session
+        ) {
+          wakeQueueRef.current = null;
+          resolve();
+        }
+      });
+    }
+  }, [playAudioClip]);
 
   const playWithChatTTS = useCallback(
     async (s: TelegramSection): Promise<void> => {
       const key = sectionKey(s);
+      stopPlayback(false);
+      const session = playbackSessionRef.current;
       setPlayingKey(key);
       setClipProgress("...");
-      abortRef.current = true;
-      if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
+      setPlaybackError(null);
       queueRef.current = [];
+      streamDoneRef.current = false;
 
       const text = buildSpeechText(s);
       const seed = voice.seed!;
+      const controller = new AbortController();
+      requestAbortRef.current = controller;
+      const queueDone = pumpQueue(session)
+        .then(() => null as Error | null)
+        .catch((queueError) => {
+          if (playbackSessionRef.current === session) controller.abort();
+          return queueError instanceof Error ? queueError : new Error(String(queueError));
+        });
 
       try {
         const params = new URLSearchParams({ text, seed: String(seed), stream: "true" });
-        const resp = await fetch(`/api/live-telegram/clips?${params}`, { method: "POST" });
+        const resp = await fetch(`/api/live-telegram/clips?${params}`, {
+          method: "POST",
+          signal: controller.signal,
+        });
         if (!resp.ok) throw new Error(`${resp.status}`);
 
         const reader = resp.body?.getReader();
         if (!reader) throw new Error("no stream");
         const decoder = new TextDecoder();
-        abortRef.current = false;
 
         // 读取第一句后立即开始播放
         let buf = "";
-        while (!abortRef.current) {
+        while (playbackSessionRef.current === session) {
           const { done, value } = await reader.read();
           if (done) break;
           buf += decoder.decode(value, { stream: true });
@@ -259,43 +390,71 @@ export default function LiveFeed() {
           buf = lines.pop() || "";  // 保留未完成的行
 
           for (const line of lines) {
-            if (!line.trim() || abortRef.current) continue;
+            if (!line.trim() || playbackSessionRef.current !== session) continue;
             try {
-              const clip = JSON.parse(line);
+              const clip = JSON.parse(line) as AudioClip & { error?: string };
+              if (clip.error) throw new Error(clip.error);
+              if (!clip.url || !Number.isInteger(clip.index) || !Number.isInteger(clip.total)) {
+                throw new Error("无效的音频片段响应");
+              }
               queueRef.current.push(clip);
-              pumpQueue();  // 非阻塞启动播放
-            } catch { /* skip */ }
+              wakeQueue();
+            } catch (parseError) {
+              throw parseError instanceof SyntaxError
+                ? new Error("ChatTTS 返回了无效的流数据")
+                : parseError;
+            }
           }
         }
       } catch (e) {
-        console.error("ChatTTS 播放失败:", e);
+        if (playbackSessionRef.current === session && !(e instanceof DOMException && e.name === "AbortError")) {
+          console.error("ChatTTS 播放失败:", e);
+          setPlaybackError("ChatTTS 暂不可用，已切换为浏览器语音");
+          queueRef.current = [];
+          stopCurrentClipRef.current?.();
+          audioRef.current?.pause();
+          if (playbackSessionRef.current === session) {
+            await speakInBrowser(text);
+          }
+        }
+      } finally {
+        if (playbackSessionRef.current === session) {
+          requestAbortRef.current = null;
+          streamDoneRef.current = true;
+          wakeQueue();
+        }
       }
-      setPlayingKey(null);
-      setClipProgress("");
+      const queueError = await queueDone;
+      if (queueError && playbackSessionRef.current === session) {
+        console.error("音频片段播放失败:", queueError);
+        setPlaybackError("音频加载或播放失败，请重试");
+      }
+      if (playbackSessionRef.current === session) {
+        setPlayingKey(null);
+        setClipProgress("");
+      }
     },
-    [voice, pumpQueue],
+    [voice, pumpQueue, stopPlayback, wakeQueue],
   );
 
   const playWithWebSpeech = useCallback(
     (s: TelegramSection): void => {
       const key = sectionKey(s);
+      stopPlayback(false);
+      const session = playbackSessionRef.current;
       setPlayingKey(key);
       setClipProgress("");
-      abortRef.current = true;
-      if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
-      window.speechSynthesis?.cancel();
+      setPlaybackError(null);
 
       const text = buildSpeechText(s);
-      const utt = new SpeechSynthesisUtterance(text);
-      utt.lang = "zh-CN";
-      utt.rate = 1.1;
-      utt.pitch = 1.0;
-      utt.volume = 0.9;
-      utt.onend = () => { setPlayingKey(null); setClipProgress(""); };
-      utt.onerror = () => { setPlayingKey(null); setClipProgress(""); };
-      window.speechSynthesis?.speak(utt);
+      speakInBrowser(text).then((played) => {
+        if (playbackSessionRef.current !== session) return;
+        if (!played) setPlaybackError("浏览器无法启动语音播放");
+        setPlayingKey(null);
+        setClipProgress("");
+      });
     },
-    [],
+    [stopPlayback],
   );
 
   const playSection = useCallback(
@@ -373,14 +532,10 @@ export default function LiveFeed() {
     } catch {
       /* ignore */
     }
-    // 切换引擎时停止当前播放
-    window.speechSynthesis?.cancel();
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current = null;
-    }
-    setPlayingKey(null);
+    stopPlayback();
   };
+
+  useEffect(() => () => stopPlayback(false), [stopPlayback]);
 
   const live = isMarketOpen();
   const lastTime = sections.length > 0 ? sections[0].time : null;
@@ -595,6 +750,12 @@ export default function LiveFeed() {
           </div>
         )}
 
+        {playbackError && (
+          <div className="rounded-card border border-warning/30 bg-warning/10 px-4 py-2 text-xs text-warning">
+            {playbackError}
+          </div>
+        )}
+
         {sections.length === 0 && !error && (
           <div className="flex flex-col items-center justify-center py-20 text-muted gap-3">
             <Radio className="h-10 w-10 opacity-30" />
@@ -645,8 +806,7 @@ export default function LiveFeed() {
                   )}
                   {/* 播放按钮 */}
                   <button
-                    onClick={() => playSection(s)}
-                    disabled={isPlaying}
+                    onClick={() => isPlaying ? stopPlayback() : playSection(s)}
                     className={`shrink-0 flex items-center gap-1 rounded-md px-1.5 py-0.5 transition-all cursor-pointer ${
                       isPlaying
                         ? "bg-accent/20 text-accent"
@@ -656,7 +816,7 @@ export default function LiveFeed() {
                   >
                     {isPlaying ? (
                       <>
-                        <Loader2 className="h-3 w-3 animate-spin" />
+                        <Square className="h-3 w-3 fill-current" />
                         {clipProgress && (
                           <span className="text-[9px] font-mono text-accent/70">{clipProgress}</span>
                         )}
