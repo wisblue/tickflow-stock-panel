@@ -200,28 +200,7 @@ export default function LiveFeed() {
 
   // ---- 流式播放（ChatTTS 分句） ----
 
-  const playClipSeq = useCallback(async (clips: { url: string; duration: number }[]) => {
-    abortRef.current = false;
-    for (let i = 0; i < clips.length; i++) {
-      if (abortRef.current) break;
-      setClipProgress(`${i + 1}/${clips.length}`);
-
-      const audio = new Audio(clips[i].url);
-      audioRef.current = audio;
-
-      try {
-        await new Promise<void>((resolve, reject) => {
-          audio.onended = () => resolve();
-          audio.onerror = () => reject(new Error("play error"));
-          audio.play().catch(reject);
-        });
-      } catch {
-        if (!abortRef.current) break;
-      }
-    }
-  }, []);
-
-  const queueRef = useRef<{ url: string }[]>([]);
+  const queueRef = useRef<{ url: string; index: number; total: number }[]>([]);
   const playingRef = useRef(false);
 
   const pumpQueue = useCallback(async () => {
